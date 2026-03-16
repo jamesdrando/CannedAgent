@@ -413,7 +413,8 @@ async def create_message(
             write_session.add(persisted_chat)
             write_session.commit()
 
-            if persisted_chat.title == "New chat" and assistant_message.sequence == 2:
+            message_count = len(list_messages_for_chat(write_session, persisted_chat.id))
+            if persisted_chat.title == "New chat" and message_count == 2:
                 try:
                     persisted_chat.title = await generate_chat_title(
                         client,

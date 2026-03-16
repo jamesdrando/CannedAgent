@@ -5,6 +5,8 @@ const md = window.markdownit({
     typographer: true,
 });
 
+const DRAFT_CHAT_ID = "__draft__";
+
 const elements = {
     appLayout: document.querySelector(".app-layout"),
     sidebarBackdrop: document.getElementById("sidebar-backdrop"),
@@ -30,6 +32,8 @@ const state = {
     chats: [],
     currentChatId: null,
     messages: [],
+    hasDraft: false,
+    draftInput: "",
     streaming: false,
 };
 
@@ -43,6 +47,17 @@ function requestRender() {
 
 function closeSidebar() {
     elements.appLayout.classList.remove("sidebar-open");
+}
+
+function startNewChat() {
+    state.hasDraft = true;
+    state.currentChatId = DRAFT_CHAT_ID;
+    state.messages = [];
+    elements.input.value = state.draftInput;
+    closeSidebar();
+    requestRender();
+    resizeInput();
+    elements.input.focus();
 }
 
 function resizeInput() {
@@ -127,7 +142,7 @@ function getLanguageLabel(codeElement) {
 }
 
 function renderChatList() {
-    if (!state.chats.length) {
+    if (!state.chats.length && !state.hasDraft) {
         elements.chatList.innerHTML = '<p class="sidebar-empty">No chats yet.</p>';
         return;
     }
@@ -143,7 +158,23 @@ function renderChatList() {
         }
     }
 
-    elements.chatList.innerHTML = groups.map((group) => `
+    const draftMarkup = state.hasDraft ? `
+        <section class="chat-group">
+            <p class="chat-group-label">Draft</p>
+            <div class="chat-group-items">
+                <button
+                    type="button"
+                    class="chat-list-item ${state.currentChatId === DRAFT_CHAT_ID ? "active" : ""}"
+                    data-chat-id="${DRAFT_CHAT_ID}"
+                >
+                    <strong>${escapeHtml(state.draftInput.trim() || "New chat")}</strong>
+                    <small>Not saved yet</small>
+                </button>
+            </div>
+        </section>
+    ` : "";
+
+    elements.chatList.innerHTML = draftMarkup + groups.map((group) => `
         <section class="chat-group">
             <p class="chat-group-label">${escapeHtml(group.label)}</p>
             <div class="chat-group-items">
@@ -204,25 +235,30 @@ function enhanceCodeBlocks() {
 }
 
 function renderThread() {
-    const hasMessages = state.messages.length > 0;
-    elements.emptyState.hidden = Boolean(state.currentChatId && hasMessages);
-    elements.thread.hidden = !state.currentChatId || !hasMessages;
+    const visibleMessages = state.currentChatId === DRAFT_CHAT_ID ? [] : state.messages;
+    const hasMessages = visibleMessages.length > 0;
+    const hasSelection = Boolean(state.currentChatId);
+    elements.emptyState.hidden = hasSelection && hasMessages;
+    elements.thread.hidden = !(hasSelection && hasMessages);
 
-    if (!state.currentChatId || !hasMessages) {
+    if (!(hasSelection && hasMessages)) {
         elements.thread.innerHTML = "";
         return;
     }
 
-    elements.thread.innerHTML = state.messages.map(renderMessage).join("");
+    elements.thread.innerHTML = visibleMessages.map(renderMessage).join("");
     enhanceCodeBlocks();
     elements.thread.scrollTop = elements.thread.scrollHeight;
 }
 
 function syncControls() {
     elements.sendButton.disabled = state.streaming || !elements.input.value.trim();
-    elements.renameChatButton.disabled = !state.currentChatId || state.streaming;
-    elements.deleteChatButton.disabled = !state.currentChatId || state.streaming;
+    elements.renameChatButton.disabled = !state.currentChatId || state.currentChatId === DRAFT_CHAT_ID || state.streaming;
+    elements.deleteChatButton.disabled = !state.currentChatId || state.currentChatId === DRAFT_CHAT_ID || state.streaming;
     elements.newChatButton.disabled = state.streaming;
+    if (state.currentChatId === DRAFT_CHAT_ID) {
+        state.draftInput = elements.input.value;
+    }
     resizeInput();
 }
 
@@ -234,6 +270,10 @@ function renderUser() {
 }
 
 function renderTitle() {
+    if (state.currentChatId === DRAFT_CHAT_ID) {
+        elements.title.textContent = "New chat";
+        return;
+    }
     const activeChat = state.chats.find((chat) => chat.id === state.currentChatId);
     elements.title.textContent = activeChat ? activeChat.title : "New chat";
 }
@@ -258,9 +298,21 @@ async function fetchChats() {
 }
 
 async function loadChat(chatId) {
+    if (state.currentChatId === DRAFT_CHAT_ID) {
+        state.draftInput = elements.input.value;
+    }
+    if (chatId === DRAFT_CHAT_ID) {
+        state.currentChatId = DRAFT_CHAT_ID;
+        state.messages = [];
+        elements.input.value = state.draftInput;
+        closeSidebar();
+        requestRender();
+        return;
+    }
     const payload = await api(`/api/chats/${chatId}`);
     state.currentChatId = payload.id;
     state.messages = payload.messages;
+    elements.input.value = "";
     closeSidebar();
     requestRender();
 }
@@ -276,6 +328,8 @@ async function createChat() {
     state.chats.unshift(chat);
     state.currentChatId = chat.id;
     state.messages = [];
+    state.hasDraft = false;
+    state.draftInput = "";
     requestRender();
     return chat;
 }
@@ -294,7 +348,7 @@ async function sendMessage() {
     const content = elements.input.value.trim();
     if (!content || state.streaming) return;
 
-    if (!state.currentChatId) {
+    if (!state.currentChatId || state.currentChatId === DRAFT_CHAT_ID) {
         await createChat();
     }
 
@@ -305,6 +359,7 @@ async function sendMessage() {
     state.messages.push(assistantMessage);
     state.streaming = true;
     elements.input.value = "";
+    state.draftInput = "";
     requestRender();
 
     let requestSucceeded = false;
@@ -423,9 +478,8 @@ elements.composer.addEventListener("submit", async (event) => {
     await sendMessage();
 });
 
-elements.newChatButton.addEventListener("click", async () => {
-    await createChat();
-    closeSidebar();
+elements.newChatButton.addEventListener("click", () => {
+    startNewChat();
 });
 
 elements.renameChatButton.addEventListener("click", async () => {
