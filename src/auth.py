@@ -17,7 +17,12 @@ from src.models import SessionRecord, User, utcnow
 SESSION_COOKIE_NAME = "canned_agent_session"
 SESSION_TTL_DAYS = 14
 PBKDF2_ITERATIONS = 310_000
-SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes"}
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
+DEFAULT_COOKIE_SECURE = APP_ENV == "production"
+DEFAULT_COOKIE_SAMESITE = "strict" if APP_ENV == "production" else "lax"
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", str(int(DEFAULT_COOKIE_SECURE))).strip().lower() in {"1", "true", "yes"}
+SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", DEFAULT_COOKIE_SAMESITE).strip().lower()
+SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN", "").strip() or None
 
 
 def ensure_utc(value: datetime) -> datetime:
@@ -89,15 +94,16 @@ def set_session_cookie(response: Response, token: str, expires_at: datetime) -> 
         value=token,
         httponly=True,
         secure=SESSION_COOKIE_SECURE,
-        samesite="lax",
+        samesite=SESSION_COOKIE_SAMESITE,
         max_age=max_age,
         expires=max_age,
         path="/",
+        domain=SESSION_COOKIE_DOMAIN,
     )
 
 
 def clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/", domain=SESSION_COOKIE_DOMAIN)
 
 
 def authenticate_user(session: Session, identifier: str, password: str) -> Optional[User]:

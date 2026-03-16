@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
@@ -43,24 +46,73 @@ LOGIN_PAGE = PAGES_DIR / "login.html"
 APP_PAGE = PAGES_DIR / "index.html"
 
 db_session_dep = Annotated[Session, Depends(get_db_session)]
+login_attempts: dict[str, deque[float]] = defaultdict(deque)
 
 
 def should_seed_default_admin() -> bool:
     return os.getenv("SEED_DEFAULT_ADMIN", "1").strip().lower() not in {"0", "false", "no"}
 
 
+def is_production() -> bool:
+    return os.getenv("APP_ENV", "development").strip().lower() == "production"
+
+
 def cors_origins() -> list[str]:
     origins: set[str] = set()
     app_origin = os.getenv("APP_ORIGIN", "").strip()
-    app_env = os.getenv("APP_ENV", "development").strip().lower()
 
     if app_origin:
         origins.add(app_origin.rstrip("/"))
 
-    if app_env != "production":
+    if not is_production():
         origins.update(DEV_CORS_ORIGINS)
 
     return sorted(origins)
+
+
+def trusted_hosts() -> list[str]:
+    configured = os.getenv("TRUSTED_HOSTS", "").strip()
+    if configured:
+        return [host.strip() for host in configured.split(",") if host.strip()]
+    if is_production():
+        app_origin = os.getenv("APP_ORIGIN", "").strip()
+        if app_origin:
+            return [app_origin.split("://", 1)[-1].rstrip("/")]
+    return ["127.0.0.1", "localhost", "127.0.0.1:8000", "localhost:8000"]
+
+
+def login_rate_limit_window_seconds() -> int:
+    return max(1, int(os.getenv("LOGIN_RATE_LIMIT_WINDOW_SECONDS", "300")))
+
+
+def login_rate_limit_max_attempts() -> int:
+    return max(1, int(os.getenv("LOGIN_RATE_LIMIT_MAX_ATTEMPTS", "8")))
+
+
+def enforce_login_rate_limit(ip_address: str) -> None:
+    now = time.time()
+    window_seconds = login_rate_limit_window_seconds()
+    attempts = login_attempts[ip_address]
+    while attempts and attempts[0] <= now - window_seconds:
+        attempts.popleft()
+    if len(attempts) >= login_rate_limit_max_attempts():
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please wait a few minutes and try again.",
+        )
+
+
+def register_login_attempt(ip_address: str, *, succeeded: bool) -> None:
+    if succeeded:
+        login_attempts.pop(ip_address, None)
+        return
+
+    now = time.time()
+    attempts = login_attempts[ip_address]
+    attempts.append(now)
+    window_seconds = login_rate_limit_window_seconds()
+    while attempts and attempts[0] <= now - window_seconds:
+        attempts.popleft()
 
 
 def get_client() -> genai.Client:
@@ -191,6 +243,10 @@ class MessageCreatePayload(BaseModel):
 
 app = FastAPI()
 
+allowed_trusted_hosts = trusted_hosts()
+if allowed_trusted_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_trusted_hosts)
+
 allowed_cors_origins = cors_origins()
 if allowed_cors_origins:
     app.add_middleware(
@@ -252,12 +308,16 @@ def auth_login(
     response: Response,
     session: db_session_dep,
 ):
+    request_ip = client_ip(request) or "unknown"
+    enforce_login_rate_limit(request_ip)
     user = authenticate_user(session, payload.identifier, payload.password)
     if user is None:
+        register_login_attempt(request_ip, succeeded=False)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials.",
         )
+    register_login_attempt(request_ip, succeeded=True)
 
     token, expires_at = create_session_record(
         session,
