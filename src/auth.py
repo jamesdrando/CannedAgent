@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -16,6 +17,7 @@ from src.models import SessionRecord, User, utcnow
 SESSION_COOKIE_NAME = "canned_agent_session"
 SESSION_TTL_DAYS = 14
 PBKDF2_ITERATIONS = 310_000
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes"}
 
 
 def ensure_utc(value: datetime) -> datetime:
@@ -86,7 +88,7 @@ def set_session_cookie(response: Response, token: str, expires_at: datetime) -> 
         key=SESSION_COOKIE_NAME,
         value=token,
         httponly=True,
-        secure=False,
+        secure=SESSION_COOKIE_SECURE,
         samesite="lax",
         max_age=max_age,
         expires=max_age,

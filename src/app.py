@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -28,14 +29,12 @@ from src.db import engine, get_db_session, init_db
 from src.models import Chat, Message, User, utcnow
 
 
-origins = [
-    "http://127.0.0.1:8000",
-    "http://localhost:8000",
+DEV_CORS_ORIGINS = {
     "http://127.0.0.1:3000",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
     "http://localhost:5173",
-]
+}
 
 MODEL = "gemini-3.1-flash-lite-preview"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -44,6 +43,24 @@ LOGIN_PAGE = PAGES_DIR / "login.html"
 APP_PAGE = PAGES_DIR / "index.html"
 
 db_session_dep = Annotated[Session, Depends(get_db_session)]
+
+
+def should_seed_default_admin() -> bool:
+    return os.getenv("SEED_DEFAULT_ADMIN", "1").strip().lower() not in {"0", "false", "no"}
+
+
+def cors_origins() -> list[str]:
+    origins: set[str] = set()
+    app_origin = os.getenv("APP_ORIGIN", "").strip()
+    app_env = os.getenv("APP_ENV", "development").strip().lower()
+
+    if app_origin:
+        origins.add(app_origin.rstrip("/"))
+
+    if app_env != "production":
+        origins.update(DEV_CORS_ORIGINS)
+
+    return sorted(origins)
 
 
 def get_client() -> genai.Client:
@@ -174,13 +191,15 @@ class MessageCreatePayload(BaseModel):
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+allowed_cors_origins = cors_origins()
+if allowed_cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type"],
+    )
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -188,8 +207,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
-    with Session(engine) as session:
-        seed_admin_user(session)
+    if should_seed_default_admin():
+        with Session(engine) as session:
+            seed_admin_user(session)
 
 
 @app.get("/")
@@ -380,10 +400,14 @@ async def create_message(
                 model=MODEL,
                 history=history,
                 config=types.GenerateContentConfig(
+                    # system_instruction=(
+                    #     "You are an AI coding agent. "
+                    #     "Respond using GitHub-flavored Markdown. "
+                    #     "Use fenced code blocks for code, bullets for lists, and short headings when helpful."
+                    # ),
                     system_instruction=(
-                        "You are an AI coding agent. "
+                        "You are an AI agent. "
                         "Respond using GitHub-flavored Markdown. "
-                        "Use fenced code blocks for code, bullets for lists, and short headings when helpful."
                     ),
                 ),
             )
