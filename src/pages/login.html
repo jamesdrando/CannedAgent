@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/login.css">
+    <title>Sign In | Canned Agent</title>
+</head>
+<body>
+    <main class="login-shell">
+        <section class="login-card">
+            <p class="eyebrow">Canned Agent</p>
+            <h1>Sign in</h1>
+            <p class="subtle">Use your account to access the private workspace.</p>
+
+            <form id="login-form" class="login-form">
+                <label for="identifier">Email or username</label>
+                <input id="identifier" name="identifier" type="text" autocomplete="username" required>
+
+                <label for="password">Password</label>
+                <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+                <button id="login-button" type="submit">Sign in</button>
+                <p id="login-error" class="error-text" hidden></p>
+            </form>
+
+            <div class="login-hint">
+                <span>Seed admin</span>
+                <code>admin</code>
+                <code>password123</code>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/js/login.js"></script>
+</body>
+</html>

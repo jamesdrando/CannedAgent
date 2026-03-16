@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <title>Canned Agent</title>
+</head>
+<body>
+    <main class="app-layout">
+        <aside class="sidebar">
+            <div class="sidebar-top">
+                <div class="brand">
+                    <div class="brand-badge">C</div>
+                    <div>
+                        <p class="brand-kicker">Private Workspace</p>
+                        <h1>Canned Agent</h1>
+                    </div>
+                </div>
+                <button id="new-chat-button" class="primary-button" type="button">+ New chat</button>
+            </div>
+
+            <section class="sidebar-section">
+                <div class="section-label">Chats</div>
+                <div id="chat-list" class="chat-list"></div>
+            </section>
+
+            <footer class="sidebar-footer">
+                <div class="user-card">
+                    <div class="user-avatar" id="user-avatar">A</div>
+                    <div class="user-meta">
+                        <strong id="user-name">admin</strong>
+                        <span id="user-email">admin@example.com</span>
+                    </div>
+                </div>
+                <button id="logout-button" class="ghost-button" type="button">Log out</button>
+            </footer>
+        </aside>
+
+        <section class="conversation-panel">
+            <header class="conversation-header">
+                <div class="conversation-heading">
+                    <button id="sidebar-toggle-button" class="ghost-button sidebar-toggle" type="button">Chats</button>
+                    <p class="section-label">Conversation</p>
+                    <h2 id="chat-title">New chat</h2>
+                </div>
+                <div class="conversation-actions">
+                    <button id="rename-chat-button" class="ghost-button" type="button">Rename</button>
+                    <button id="delete-chat-button" class="ghost-button danger-button" type="button">Delete</button>
+                </div>
+            </header>
+
+            <div id="empty-state" class="empty-state">
+                <h3>Start a new chat</h3>
+                <p>Create a chat on the left or send a message to begin.</p>
+            </div>
+
+            <section id="chat-thread" class="chat-thread"></section>
+
+            <form id="composer" class="composer">
+                <textarea
+                    id="input-box"
+                    rows="1"
+                    placeholder="Message Canned Agent"
+                    spellcheck="true"
+                ></textarea>
+                <button id="send-button" type="submit">Send</button>
+            </form>
+        </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.1/dist/markdown-it.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
