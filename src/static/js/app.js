@@ -7,6 +7,7 @@ const md = window.markdownit({
 
 const elements = {
     appLayout: document.querySelector(".app-layout"),
+    sidebarBackdrop: document.getElementById("sidebar-backdrop"),
     chatList: document.getElementById("chat-list"),
     thread: document.getElementById("chat-thread"),
     emptyState: document.getElementById("empty-state"),
@@ -38,6 +39,10 @@ function requestRender() {
     if (renderQueued) return;
     renderQueued = true;
     requestAnimationFrame(render);
+}
+
+function closeSidebar() {
+    elements.appLayout.classList.remove("sidebar-open");
 }
 
 function resizeInput() {
@@ -158,7 +163,6 @@ function renderChatList() {
 }
 
 function renderMessage(message) {
-    const label = message.role === "assistant" ? "Agent" : "You";
     const body = message.role === "assistant"
         ? (
             message.content.trim()
@@ -169,7 +173,6 @@ function renderMessage(message) {
 
     return `
         <article class="message message-${message.role}">
-            <div class="message-meta">${label}</div>
             <div class="message-body ${message.role}-body">${body}</div>
         </article>
     `;
@@ -258,7 +261,7 @@ async function loadChat(chatId) {
     const payload = await api(`/api/chats/${chatId}`);
     state.currentChatId = payload.id;
     state.messages = payload.messages;
-    elements.appLayout.classList.remove("sidebar-open");
+    closeSidebar();
     requestRender();
 }
 
@@ -422,7 +425,7 @@ elements.composer.addEventListener("submit", async (event) => {
 
 elements.newChatButton.addEventListener("click", async () => {
     await createChat();
-    elements.appLayout.classList.remove("sidebar-open");
+    closeSidebar();
 });
 
 elements.renameChatButton.addEventListener("click", async () => {
@@ -445,6 +448,16 @@ elements.chatList.addEventListener("click", async (event) => {
 
 elements.sidebarToggleButton.addEventListener("click", () => {
     elements.appLayout.classList.toggle("sidebar-open");
+});
+
+elements.sidebarBackdrop.addEventListener("click", () => {
+    closeSidebar();
+});
+
+window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+        closeSidebar();
+    }
 });
 
 elements.thread.addEventListener("click", async (event) => {

@@ -9,7 +9,7 @@
     --accent: #ff4d8d;
     --accent-strong: #ff2f78;
     --assistant: #1c1f25;
-    --user: #2a2d34;
+    --user: #521932;
     --code: #10131a;
     --shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
 }
@@ -76,6 +76,10 @@ pre, code {
     padding: 1rem;
     border-right: 1px solid var(--border);
     background: #14161a;
+}
+
+.sidebar-backdrop {
+    display: none;
 }
 
 .sidebar-top {
@@ -146,6 +150,25 @@ pre, code {
     padding: 0.7rem 0.9rem;
 }
 
+.icon-button {
+    width: 42px;
+    height: 42px;
+    display: inline-grid;
+    place-items: center;
+    padding: 0;
+}
+
+.icon-button svg {
+    width: 18px;
+    height: 18px;
+}
+
+.icon-button-primary {
+    border-color: transparent;
+    background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+    color: white;
+}
+
 .danger-button {
     color: #ff9bb9;
     border-color: rgba(255, 77, 141, 0.28);
@@ -210,7 +233,7 @@ pre, code {
 }
 
 .chat-list-item strong {
-    font-size: 0.95rem;
+    font-size: 0.60;
     font-weight: 600;
 }
 
@@ -274,9 +297,9 @@ pre, code {
 
 .conversation-header {
     grid-row: 1;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
     gap: 1rem;
     padding: 1rem 1.2rem;
     border-bottom: 1px solid var(--border);
@@ -286,6 +309,7 @@ pre, code {
     display: flex;
     align-items: center;
     gap: 0.65rem;
+    justify-self: end;
 }
 
 .sidebar-toggle {
@@ -304,6 +328,7 @@ pre, code {
     overflow: auto;
     display: grid;
     align-content: start;
+    justify-items: center;
     gap: 1rem;
     padding: 1.2rem;
 }
@@ -325,7 +350,7 @@ pre, code {
 
 .message {
     min-width: 0;
-    max-width: min(78ch, 100%);
+    width: min(78ch, 100%);
     display: grid;
     gap: 0.55rem;
     padding: 0.95rem 1rem;
@@ -335,21 +360,17 @@ pre, code {
 }
 
 .message-assistant {
-    background: var(--assistant);
+    justify-self: center;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    padding-inline: 0;
 }
 
 .message-user {
     justify-self: end;
     width: min(56ch, 88%);
     background: var(--user);
-}
-
-.message-meta {
-    color: var(--muted);
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
 }
 
 .message-body {
@@ -539,6 +560,22 @@ pre, code {
         transform: translateX(0);
     }
 
+    .sidebar-backdrop {
+        display: block;
+        position: absolute;
+        inset: 0;
+        z-index: 10;
+        background: rgba(0, 0, 0, 0.42);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 180ms ease;
+    }
+
+    .app-layout.sidebar-open .sidebar-backdrop {
+        opacity: 1;
+        pointer-events: auto;
+    }
+
     .chat-list {
         max-height: 180px;
     }
@@ -548,11 +585,93 @@ pre, code {
         margin-bottom: 0.65rem;
     }
 
+    .conversation-actions {
+        flex-shrink: 0;
+    }
+}
+
+@media (max-width: 640px) {
     .conversation-header {
-        align-items: flex-start;
+        padding: 0.8rem 0.9rem;
+        gap: 0.7rem;
+    }
+
+    .conversation-heading {
+        display: grid;
+        gap: 0.4rem;
+    }
+
+    .sidebar-toggle {
+        margin-bottom: 0;
+        justify-self: start;
+    }
+
+    #chat-title {
+        white-space: normal;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
     }
 
     .conversation-actions {
-        flex-shrink: 0;
+        justify-content: flex-end;
+        gap: 0.5rem;
+    }
+
+    .ghost-button {
+        padding: 0.6rem 0.75rem;
+        font-size: 0.92rem;
+    }
+
+    .icon-button {
+        width: 38px;
+        height: 38px;
+        padding: 0;
+    }
+
+    .chat-thread {
+        padding: 0.85rem;
+        gap: 0.85rem;
+    }
+
+    .message {
+        width: 100%;
+        padding: 0.85rem 0.9rem;
+    }
+
+    .message-user {
+        width: 100%;
+    }
+
+    .assistant-body pre {
+        padding: 2.5rem 0.85rem 0.85rem;
+        font-size: 0.92rem;
+    }
+
+    .code-toolbar {
+        inset: 0.6rem 0.7rem auto;
+    }
+
+    .copy-code {
+        padding: 0.28rem 0.55rem;
+        font-size: 0.76rem;
+    }
+
+    .composer {
+        padding: 0.8rem 0.85rem calc(0.8rem + env(safe-area-inset-bottom));
+        gap: 0.65rem;
+    }
+
+    #input-box {
+        min-height: 52px;
+        font-size: 16px;
+        padding: 0.85rem 0.9rem;
+    }
+
+    #send-button {
+        min-width: 78px;
+        height: 52px;
+        padding: 0 0.85rem;
     }
 }
