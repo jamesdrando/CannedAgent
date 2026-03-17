@@ -89,7 +89,7 @@ body::before {
 
 .login-title {
     margin: 0;
-    font-size: clamp(2rem, 4vw, 2.45rem);
+    font-size: clamp(1.2rem, 3vw, 1.6rem);
     line-height: 1.05;
 }
 
@@ -187,7 +187,7 @@ body::before {
     background: var(--input);
     color: var(--text);
     font: inherit;
-    padding: 0.92rem 1rem;
+    padding: 0.75rem .9rem;
     outline: none;
 }
 
@@ -203,7 +203,7 @@ body::before {
     color: #0e1418;
     font: inherit;
     font-weight: 700;
-    padding: 0.95rem 1rem;
+    padding: 0.75rem .9rem;
     cursor: pointer;
 }
 
