@@ -100,20 +100,20 @@ body::before {
     line-height: 1.55;
 }
 
-.jbbr-logo {
+.jobbr-logo {
     display: grid;
     justify-items: center;
     gap: 0.85rem;
 }
 
-.jbbr-logo__frame {
+.jobbr-logo__frame {
     padding: 0.95rem;
     border: 1px solid var(--logo-outline);
     border-radius: 28px;
     background: linear-gradient(180deg, #111922 0%, #0d141b 100%);
 }
 
-.jbbr-logo__board {
+.jobbr-logo__board {
     width: clamp(164px, 36vw, 212px);
     aspect-ratio: 1;
     display: grid;
@@ -125,7 +125,7 @@ body::before {
     overflow: hidden;
 }
 
-.jbbr-logo__glyph,
+.jobbr-logo__glyph,
 .login-anim-logo__canvas {
     width: 100%;
     height: 100%;
@@ -145,23 +145,23 @@ body::before {
     transition: background-color 120ms linear;
 }
 
-.jbbr-logo .pixel-a {
+.jobbr-logo .pixel-a {
     fill: var(--pixel-a);
 }
 
-.jbbr-logo .pixel-b {
+.jobbr-logo .pixel-b {
     fill: var(--pixel-b);
 }
 
-.jbbr-logo .pixel-c {
+.jobbr-logo .pixel-c {
     fill: var(--pixel-c);
 }
 
-.jbbr-logo .pixel-d {
+.jobbr-logo .pixel-d {
     fill: var(--pixel-d);
 }
 
-.jbbr-logo__name {
+.jobbr-logo__name {
     margin: 0;
     color: var(--muted-strong);
     font-size: 0.78rem;
@@ -241,7 +241,7 @@ body::before {
         border-radius: 26px;
     }
 
-    .jbbr-logo__board {
+    .jobbr-logo__board {
         width: min(184px, 48vw);
     }
 }

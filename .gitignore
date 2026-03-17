@@ -206,7 +206,9 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# jobbr
 reset_users.sh
 Caddyfile
 canned-agent.env
 canned-agent.service
+*.db
