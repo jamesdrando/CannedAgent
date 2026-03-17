@@ -11,8 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from google import genai
-from google.genai import types
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -29,7 +27,13 @@ from src.auth import (
     set_session_cookie,
 )
 from src.db import engine, get_db_session, init_db
-from src.models import Chat, Message, User, utcnow
+from src.internal.providers import (
+    ConversationMessage,
+    ProviderRegistry,
+    RunSettings,
+    RunSettingsPatch,
+)
+from src.models import Chat, ChatSettings, Message, User, UserPreference, utcnow
 
 
 DEV_CORS_ORIGINS = {
@@ -39,12 +43,12 @@ DEV_CORS_ORIGINS = {
     "http://localhost:5173",
 }
 
-MODEL = "gemini-3.1-flash-lite-preview"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PAGES_DIR = Path(__file__).resolve().parent / "pages"
 LOGIN_PAGE = PAGES_DIR / "login.html"
 APP_PAGE = PAGES_DIR / "index.html"
 
+provider_registry = ProviderRegistry()
 db_session_dep = Annotated[Session, Depends(get_db_session)]
 login_attempts: dict[str, deque[float]] = defaultdict(deque)
 
@@ -115,10 +119,6 @@ def register_login_attempt(ip_address: str, *, succeeded: bool) -> None:
         attempts.popleft()
 
 
-def get_client() -> genai.Client:
-    return genai.Client()
-
-
 def chat_title_from_content(content: str) -> str:
     normalized = " ".join(content.strip().split())
     if not normalized:
@@ -136,33 +136,25 @@ def sanitize_generated_title(value: str) -> str:
 
 
 async def generate_chat_title(
-    client: genai.Client,
+    *,
+    settings: RunSettings,
     user_message: str,
     assistant_message: str,
 ) -> str:
-    response = await client.aio.models.generate_content(
-        model=MODEL,
-        contents=(
-            "Respond with one single line only for this message only: "
-            "What is a good short chat title for this conversation? "
-            "Respond only with the title itself.\n\n"
-            f"User message:\n{user_message}\n\n"
-            f"Assistant response:\n{assistant_message}"
-        ),
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            max_output_tokens=24,
-        ),
+    adapter = provider_registry.adapter_for(settings.provider)
+    if adapter is None:
+        return chat_title_from_content(user_message)
+
+    generated = await adapter.generate_title(
+        user_message=user_message,
+        assistant_message=assistant_message,
+        settings=settings,
     )
-    return sanitize_generated_title(response.text or "")
+    return sanitize_generated_title(generated or "") or chat_title_from_content(user_message)
 
 
-def to_genai_content(message: Message) -> types.Content:
-    role = "model" if message.role == "assistant" else "user"
-    return types.Content(
-        role=role,
-        parts=[types.Part.from_text(text=message.content)],
-    )
+def message_to_conversation(message: Message) -> ConversationMessage:
+    return ConversationMessage(role=message.role, content=message.content)
 
 
 def get_chat_for_user(session: Session, user: User, chat_id: str) -> Chat:
@@ -216,6 +208,97 @@ def build_chat_summary(session: Session, chat: Chat) -> dict:
     }
 
 
+def settings_response(settings: RunSettings) -> dict:
+    return settings.model_dump()
+
+
+def user_preferences_statement(user: User):
+    return select(UserPreference).where(UserPreference.user_id == user.id)
+
+
+def chat_settings_statement(chat: Chat):
+    return select(ChatSettings).where(ChatSettings.chat_id == chat.id)
+
+
+def apply_settings_to_record(record: UserPreference | ChatSettings, settings: RunSettings) -> None:
+    record.provider = settings.provider
+    record.model = settings.model
+    record.system_prompt = settings.system_prompt
+    record.temperature = settings.temperature
+    record.reasoning_effort = settings.reasoning_effort
+    record.updated_at = utcnow()
+
+
+def settings_from_record(record: UserPreference | ChatSettings | None) -> RunSettings:
+    return provider_registry.normalize_settings(
+        {
+            "provider": record.provider if record else None,
+            "model": record.model if record else None,
+            "system_prompt": record.system_prompt if record else None,
+            "temperature": record.temperature if record else None,
+            "reasoning_effort": record.reasoning_effort if record else None,
+        }
+    )
+
+
+def get_or_create_user_preference(session: Session, user: User) -> UserPreference:
+    preference = session.exec(user_preferences_statement(user)).first()
+    if preference is not None:
+        normalized = provider_registry.normalize_settings(settings_from_record(preference))
+        apply_settings_to_record(preference, normalized)
+        session.add(preference)
+        session.commit()
+        session.refresh(preference)
+        return preference
+
+    settings = provider_registry.normalize_settings()
+    preference = UserPreference(
+        user_id=user.id,
+        provider=settings.provider,
+        model=settings.model,
+        system_prompt=settings.system_prompt,
+        temperature=settings.temperature,
+        reasoning_effort=settings.reasoning_effort,
+    )
+    session.add(preference)
+    session.commit()
+    session.refresh(preference)
+    return preference
+
+
+def resolve_user_settings(session: Session, user: User) -> RunSettings:
+    return settings_from_record(get_or_create_user_preference(session, user))
+
+
+def get_or_create_chat_settings(session: Session, user: User, chat: Chat) -> ChatSettings:
+    settings_record = session.exec(chat_settings_statement(chat)).first()
+    if settings_record is not None:
+        normalized = provider_registry.normalize_settings(settings_from_record(settings_record))
+        apply_settings_to_record(settings_record, normalized)
+        session.add(settings_record)
+        session.commit()
+        session.refresh(settings_record)
+        return settings_record
+
+    default_settings = resolve_user_settings(session, user)
+    settings_record = ChatSettings(
+        chat_id=chat.id,
+        provider=default_settings.provider,
+        model=default_settings.model,
+        system_prompt=default_settings.system_prompt,
+        temperature=default_settings.temperature,
+        reasoning_effort=default_settings.reasoning_effort,
+    )
+    session.add(settings_record)
+    session.commit()
+    session.refresh(settings_record)
+    return settings_record
+
+
+def resolve_chat_settings(session: Session, user: User, chat: Chat) -> RunSettings:
+    return settings_from_record(get_or_create_chat_settings(session, user, chat))
+
+
 def optional_page_user(request: Request, session: Session) -> User | None:
     return get_user_for_session_token(session, request.cookies.get(SESSION_COOKIE_NAME))
 
@@ -231,6 +314,7 @@ class LoginPayload(BaseModel):
 
 class ChatCreatePayload(BaseModel):
     title: str | None = None
+    settings: RunSettingsPatch | None = None
 
 
 class ChatRenamePayload(BaseModel):
@@ -343,6 +427,38 @@ def auth_logout(request: Request, response: Response, session: db_session_dep):
     return {"ok": True}
 
 
+@app.get("/api/providers")
+def list_providers(request: Request, session: db_session_dep):
+    current_user(request, session)
+    return {
+        "providers": [capability.model_dump() for capability in provider_registry.capabilities()],
+        "default_settings": settings_response(provider_registry.normalize_settings()),
+    }
+
+
+@app.get("/api/me/preferences")
+def get_preferences(request: Request, session: db_session_dep):
+    user = current_user(request, session)
+    return settings_response(resolve_user_settings(session, user))
+
+
+@app.patch("/api/me/preferences")
+def update_preferences(
+    payload: RunSettingsPatch,
+    request: Request,
+    session: db_session_dep,
+):
+    user = current_user(request, session)
+    preference = get_or_create_user_preference(session, user)
+    current_settings = settings_from_record(preference)
+    next_settings = provider_registry.merge_settings(current_settings, payload)
+    apply_settings_to_record(preference, next_settings)
+    session.add(preference)
+    session.commit()
+    session.refresh(preference)
+    return settings_response(settings_from_record(preference))
+
+
 @app.get("/api/chats")
 def list_chats(request: Request, session: db_session_dep):
     user = current_user(request, session)
@@ -368,6 +484,19 @@ def create_chat(
     session.add(chat)
     session.commit()
     session.refresh(chat)
+    default_settings = resolve_user_settings(session, user)
+    chat_settings = provider_registry.merge_settings(default_settings, payload.settings)
+    session.add(
+        ChatSettings(
+            chat_id=chat.id,
+            provider=chat_settings.provider,
+            model=chat_settings.model,
+            system_prompt=chat_settings.system_prompt,
+            temperature=chat_settings.temperature,
+            reasoning_effort=chat_settings.reasoning_effort,
+        )
+    )
+    session.commit()
     return build_chat_summary(session, chat)
 
 
@@ -390,7 +519,34 @@ def get_chat(chat_id: str, request: Request, session: db_session_dep):
             }
             for message in messages
         ],
+        "settings": settings_response(resolve_chat_settings(session, user, chat)),
     }
+
+
+@app.get("/api/chats/{chat_id}/settings")
+def get_chat_settings(chat_id: str, request: Request, session: db_session_dep):
+    user = current_user(request, session)
+    chat = get_chat_for_user(session, user, chat_id)
+    return settings_response(resolve_chat_settings(session, user, chat))
+
+
+@app.patch("/api/chats/{chat_id}/settings")
+def update_chat_settings(
+    chat_id: str,
+    payload: RunSettingsPatch,
+    request: Request,
+    session: db_session_dep,
+):
+    user = current_user(request, session)
+    chat = get_chat_for_user(session, user, chat_id)
+    settings_record = get_or_create_chat_settings(session, user, chat)
+    current_settings = settings_from_record(settings_record)
+    next_settings = provider_registry.merge_settings(current_settings, payload)
+    apply_settings_to_record(settings_record, next_settings)
+    session.add(settings_record)
+    session.commit()
+    session.refresh(settings_record)
+    return settings_response(settings_from_record(settings_record))
 
 
 @app.patch("/api/chats/{chat_id}")
@@ -430,13 +586,23 @@ async def create_message(
     payload: MessageCreatePayload,
     request: Request,
     session: db_session_dep,
-    client: genai.Client = Depends(get_client),
 ):
     user = current_user(request, session)
     chat = get_chat_for_user(session, user, chat_id)
     content = payload.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Message content cannot be empty.")
+    settings = resolve_chat_settings(session, user, chat)
+    adapter = provider_registry.adapter_for(settings.provider)
+    if adapter is None:
+        raise HTTPException(status_code=400, detail="The selected provider is not supported.")
+
+    capability = provider_registry.capability_for(settings.provider)
+    if capability and not capability.configured:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{capability.label} is not configured on this server.",
+        )
 
     user_message = Message(
         chat_id=chat.id,
@@ -450,32 +616,19 @@ async def create_message(
     session.commit()
 
     messages = list_messages_for_chat(session, chat.id)
-    history = [to_genai_content(message) for message in messages[:-1]]
+    history = [message_to_conversation(message) for message in messages[:-1]]
     current_message = messages[-1].content
 
     async def gen():
         assistant_chunks: list[str] = []
         try:
-            chat_session = client.aio.chats.create(
-                model=MODEL,
+            async for chunk in adapter.stream_text(
                 history=history,
-                config=types.GenerateContentConfig(
-                    # system_instruction=(
-                    #     "You are an AI coding agent. "
-                    #     "Respond using GitHub-flavored Markdown. "
-                    #     "Use fenced code blocks for code, bullets for lists, and short headings when helpful."
-                    # ),
-                    system_instruction=(
-                        "You are an AI agent. "
-                        "Respond using GitHub-flavored Markdown. "
-                    ),
-                ),
-            )
-            stream = await chat_session.send_message_stream(current_message)
-            async for chunk in stream:
-                if chunk.text:
-                    assistant_chunks.append(chunk.text)
-                    yield chunk.text
+                user_input=current_message,
+                settings=settings,
+            ):
+                assistant_chunks.append(chunk)
+                yield chunk
         except Exception as exc:
             yield f"### Request failed\n\n{exc}"
             return
@@ -501,9 +654,9 @@ async def create_message(
             if persisted_chat.title == "New chat" and message_count == 2:
                 try:
                     persisted_chat.title = await generate_chat_title(
-                        client,
-                        current_message,
-                        assistant_text,
+                        settings=settings,
+                        user_message=current_message,
+                        assistant_message=assistant_text,
                     )
                 except Exception:
                     persisted_chat.title = chat_title_from_content(current_message)

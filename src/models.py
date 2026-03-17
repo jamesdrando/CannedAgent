@@ -65,3 +65,31 @@ class Message(SQLModel, table=True):
     content: str
     sequence: int = Field(index=True)
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class UserPreference(SQLModel, table=True):
+    __tablename__ = "user_preferences"
+
+    id: str = Field(default_factory=lambda: uuid4().hex, primary_key=True)
+    user_id: str = Field(foreign_key="users.id", index=True, unique=True)
+    provider: str
+    model: str
+    system_prompt: str
+    temperature: Optional[float] = None
+    reasoning_effort: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ChatSettings(SQLModel, table=True):
+    __tablename__ = "chat_settings"
+
+    id: str = Field(default_factory=lambda: uuid4().hex, primary_key=True)
+    chat_id: str = Field(foreign_key="chats.id", index=True, unique=True)
+    provider: str
+    model: str
+    system_prompt: str
+    temperature: Optional[float] = None
+    reasoning_effort: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)

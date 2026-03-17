@@ -72,6 +72,60 @@
         </aside>
 
         <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="Close chat list"></button>
+        <button id="settings-backdrop" class="settings-backdrop" type="button" aria-label="Close run settings"></button>
+
+        <aside id="settings-drawer" class="settings-drawer" aria-label="Run settings">
+            <div class="settings-drawer-header">
+                <div class="settings-heading">
+                    <p class="section-label">Run Settings</p>
+                    <h3 id="settings-target-title">New chat</h3>
+                    <p id="settings-target-detail" class="settings-target-detail">Applies to the next new conversation</p>
+                </div>
+                <button id="settings-close-button" class="ghost-button icon-button" type="button" aria-label="Close run settings" title="Close run settings">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/>
+                    </svg>
+                </button>
+            </div>
+
+            <form id="settings-form" class="settings-form">
+                <label class="settings-field">
+                    <span>Provider</span>
+                    <select id="settings-provider"></select>
+                </label>
+
+                <label class="settings-field">
+                    <span>Model</span>
+                    <input id="settings-model" type="text" list="model-suggestions" placeholder="Model ID" autocomplete="off">
+                    <datalist id="model-suggestions"></datalist>
+                </label>
+
+                <label class="settings-field">
+                    <span>System prompt</span>
+                    <textarea id="settings-system-prompt" rows="8" placeholder="System prompt"></textarea>
+                </label>
+
+                <div class="settings-grid">
+                    <label class="settings-field">
+                        <span>Temperature</span>
+                        <input id="settings-temperature" type="number" min="0" max="2" step="0.1" placeholder="Default">
+                    </label>
+
+                    <label class="settings-field">
+                        <span>Reasoning</span>
+                        <select id="settings-reasoning"></select>
+                    </label>
+                </div>
+
+                <p id="settings-hint" class="settings-hint"></p>
+                <p id="settings-notice" class="settings-notice" data-tone="muted"></p>
+
+                <div class="settings-actions">
+                    <button id="save-settings-button" class="ghost-button" type="submit">Save chat settings</button>
+                    <button id="save-defaults-button" class="primary-button" type="button">Save as defaults</button>
+                </div>
+            </form>
+        </aside>
 
         <section class="conversation-panel">
             <header class="conversation-header">
@@ -83,6 +137,14 @@
                     <button id="new-chat-button" class="ghost-button icon-button icon-button-primary" type="button" aria-label="New chat" title="New chat">
                         <svg viewBox="0 0 24 24" aria-hidden="true">
                             <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
+                        </svg>
+                    </button>
+                    <button id="settings-toggle-button" class="ghost-button icon-button" type="button" aria-label="Run settings" title="Run settings">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M4 7h16M7 12h10M10 17h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/>
+                            <circle cx="15" cy="7" r="2.2" fill="currentColor"/>
+                            <circle cx="9" cy="12" r="2.2" fill="currentColor"/>
+                            <circle cx="12" cy="17" r="2.2" fill="currentColor"/>
                         </svg>
                     </button>
                     <button id="rename-chat-button" class="ghost-button icon-button" type="button" aria-label="Rename chat" title="Rename chat">
