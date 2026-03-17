@@ -1,11 +1,23 @@
 :root {
-    --bg: #101114;
-    --panel: #17191f;
-    --border: #2d3139;
-    --text: #f4f5f7;
-    --muted: #9ea6b2;
-    --accent: #ff4d8d;
-    --accent-strong: #ff2f78;
+    --bg: #0b1015;
+    --panel: #131a20;
+    --panel-soft: #182028;
+    --border: #27323a;
+    --border-strong: #34424d;
+    --text: #edf1eb;
+    --muted: #84c3b9;
+    --muted-strong: #bcc5ba;
+    --accent: #b7ff00;
+    --accent-strong: #f4ff5b;
+    --input: #10161c;
+    --logo-frame: #111922;
+    --logo-board: #0d151d;
+    --logo-grid: rgba(139, 156, 170, 0.11);
+    --logo-outline: rgba(138, 160, 177, 0.16);
+    --pixel-a: #d0d595;
+    --pixel-b: #c7ac70;
+    --pixel-c: #be7760;
+    --pixel-d: #98ae71;
 }
 
 *, *::before, *::after {
@@ -15,48 +27,152 @@
 html, body {
     margin: 0;
     min-height: 100%;
+    font-family: "Fira Code";
 }
 
 body {
     display: grid;
     place-items: center;
-    background: radial-gradient(circle at top, rgba(255, 77, 141, 0.14), transparent 28%), var(--bg);
+    position: relative;
+    background:
+        radial-gradient(circle at top, rgba(199, 172, 112, 0.10), transparent 28%),
+        radial-gradient(circle at 18% 18%, rgba(107, 139, 151, 0.10), transparent 32%),
+        linear-gradient(180deg, #091016 0%, var(--bg) 100%);
     color: var(--text);
-    font-family: "Fira Sans", sans-serif;
+    font-family: "Fira Code", sans-serif;
+    overflow: hidden;
+}
+
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background:
+        linear-gradient(var(--logo-grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--logo-grid) 1px, transparent 1px);
+    background-size: 22px 22px;
+    opacity: 0.34;
+    pointer-events: none;
 }
 
 .login-shell {
-    width: min(420px, calc(100vw - 32px));
+    width: min(520px, calc(100vw - 32px));
+    padding: 2rem 0;
 }
 
 .login-card {
-    padding: 2rem;
+    position: relative;
+    display: grid;
+    gap: 1.5rem;
+    padding: clamp(1.75rem, 4vw, 2.6rem);
     border: 1px solid var(--border);
-    border-radius: 20px;
+    border-radius: 32px;
     background: var(--panel);
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.26);
+}
+
+.login-brand {
+    display: grid;
+    justify-items: center;
+    gap: 0.55rem;
+    text-align: center;
 }
 
 .eyebrow {
-    margin: 0 0 0.5rem;
+    margin: 0;
     color: var(--muted);
     font-size: 0.76rem;
-    letter-spacing: 0.12em;
+    font-weight: 600;
+    letter-spacing: 0.2em;
     text-transform: uppercase;
 }
 
-h1 {
-    margin: 0 0 0.45rem;
+.login-title {
+    margin: 0;
+    font-size: clamp(2rem, 4vw, 2.45rem);
+    line-height: 1.05;
 }
 
-.subtle {
-    margin: 0 0 1.4rem;
+.login-subtle {
+    max-width: 28rem;
+    margin: 0;
     color: var(--muted);
+    line-height: 1.55;
+}
+
+.jbbr-logo {
+    display: grid;
+    justify-items: center;
+    gap: 0.85rem;
+}
+
+.jbbr-logo__frame {
+    padding: 0.95rem;
+    border: 1px solid var(--logo-outline);
+    border-radius: 28px;
+    background: linear-gradient(180deg, #111922 0%, #0d141b 100%);
+}
+
+.jbbr-logo__board {
+    width: clamp(164px, 36vw, 212px);
+    aspect-ratio: 1;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--logo-outline);
+    border-radius: 22px;
+    background: #09101b;
+    overflow: hidden;
+}
+
+.jbbr-logo__glyph,
+.login-anim-logo__canvas {
+    width: 100%;
+    height: 100%;
+}
+
+.login-anim-logo__canvas {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    grid-template-rows: repeat(8, 1fr);
+    gap: 0;
+    image-rendering: pixelated;
+}
+
+.login-anim-logo__cell {
+    width: 100%;
+    height: 100%;
+    transition: background-color 120ms linear;
+}
+
+.jbbr-logo .pixel-a {
+    fill: var(--pixel-a);
+}
+
+.jbbr-logo .pixel-b {
+    fill: var(--pixel-b);
+}
+
+.jbbr-logo .pixel-c {
+    fill: var(--pixel-c);
+}
+
+.jbbr-logo .pixel-d {
+    fill: var(--pixel-d);
+}
+
+.jbbr-logo__name {
+    margin: 0;
+    color: var(--muted-strong);
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
 }
 
 .login-form {
     display: grid;
-    gap: 0.75rem;
+    gap: 0.8rem;
 }
 
 .login-form label {
@@ -67,27 +183,27 @@ h1 {
 .login-form input {
     width: 100%;
     border: 1px solid var(--border);
-    border-radius: 12px;
-    background: #21242b;
+    border-radius: 14px;
+    background: var(--input);
     color: var(--text);
     font: inherit;
-    padding: 0.85rem 0.95rem;
+    padding: 0.92rem 1rem;
     outline: none;
 }
 
 .login-form input:focus {
-    border-color: rgba(255, 77, 141, 0.45);
+    border-color: var(--border-strong);
 }
 
 .login-form button {
-    margin-top: 0.4rem;
-    border: none;
-    border-radius: 12px;
-    background: linear-gradient(135deg, var(--accent), var(--accent-strong));
-    color: white;
+    margin-top: 0.5rem;
+    border: 1px solid transparent;
+    border-radius: 14px;
+    background: var(--accent);
+    color: #0e1418;
     font: inherit;
     font-weight: 700;
-    padding: 0.9rem 1rem;
+    padding: 0.95rem 1rem;
     cursor: pointer;
 }
 
@@ -98,7 +214,7 @@ h1 {
 
 .error-text {
     margin: 0;
-    color: #ff9fbe;
+    color: #d88c76;
 }
 
 .login-hint {
@@ -112,9 +228,20 @@ h1 {
 }
 
 .login-hint code {
-    padding: 0.2rem 0.45rem;
-    border-radius: 8px;
-    background: #21242b;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--panel-soft);
     font-family: "Fira Code", monospace;
     color: var(--text);
+}
+
+@media (max-width: 520px) {
+    .login-card {
+        border-radius: 26px;
+    }
+
+    .jbbr-logo__board {
+        width: min(184px, 48vw);
+    }
 }
