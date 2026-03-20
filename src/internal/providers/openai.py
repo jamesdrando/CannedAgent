@@ -183,7 +183,6 @@ class OpenAIProviderAdapter(ProviderAdapter):
             "model": self._enforced_model(settings.model),
             "messages": self._messages(history=history, user_input=user_input, settings=settings),
             "stream": stream,
-            "parallel_tool_calls": False,
         }
         if tools:
             payload["tools"] = [
@@ -198,6 +197,7 @@ class OpenAIProviderAdapter(ProviderAdapter):
                 for tool in tools
             ]
             payload["tool_choice"] = "auto"
+            payload["parallel_tool_calls"] = False
         return json.dumps(payload).encode("utf-8")
 
     def _iter_stream(self, *, history: list[ConversationMessage], user_input: str, settings: RunSettings):
