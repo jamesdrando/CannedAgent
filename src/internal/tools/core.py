@@ -94,6 +94,8 @@ BROWSER_TOOL_DEFINITIONS: list[ToolDefinition] = [
             "`pd`, `np`, `math`, `statistics`, `files`, `list_files()`, `file_info()`, "
             "`read_table(file_id_or_name)`, and `read_text(file_id_or_name)` are preloaded, so imports are optional. "
             "File ids and reference names from files.list both work. "
+            "Use this as the default computation tool for attached datasets when the user asks for derived numbers "
+            "such as averages, deltas, percent changes, regressions, forecasts, filters, rankings, or aggregations. "
             "Use raw Python only when the other file/table tools are insufficient and do not attempt network, "
             "process, or package-management access."
         ),
