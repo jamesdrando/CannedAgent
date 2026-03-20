@@ -93,3 +93,19 @@ class ChatSettings(SQLModel, table=True):
     reasoning_effort: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class UsageEvent(SQLModel, table=True):
+    __tablename__ = "usage_events"
+
+    id: str = Field(default_factory=lambda: uuid4().hex, primary_key=True)
+    user_id: str = Field(foreign_key="users.id", index=True)
+    chat_id: Optional[str] = Field(default=None, foreign_key="chats.id", index=True)
+    run_id: Optional[str] = Field(default=None, index=True)
+    request_kind: str = Field(default="chat_run", index=True)
+    provider: str = Field(index=True)
+    model: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    created_at: datetime = Field(default_factory=utcnow, index=True)

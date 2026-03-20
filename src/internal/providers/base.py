@@ -100,9 +100,18 @@ class ProviderMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ProviderUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ProviderTurn(BaseModel):
     text: str = ""
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    usage: ProviderUsage | None = None
 
     model_config = ConfigDict(extra="forbid")
 

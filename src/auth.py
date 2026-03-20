@@ -39,6 +39,11 @@ def normalize_username(value: str) -> str:
     return value.strip().lower()
 
 
+PRIMARY_ADMIN_EMAIL = normalize_email(
+    os.getenv("PRIMARY_ADMIN_EMAIL", "jamesdavidrandall7@gmail.com")
+)
+
+
 def _pbkdf2_hash(password: str, salt: bytes) -> str:
     digest = hashlib.pbkdf2_hmac(
         "sha256",
@@ -177,6 +182,27 @@ def revoke_session(session: Session, token: str | None) -> None:
     if session_record and session_record.revoked_at is None:
         session_record.revoked_at = utcnow()
         session.add(session_record)
+        session.commit()
+
+
+def is_primary_admin(user: User | None) -> bool:
+    if user is None or not user.is_active:
+        return False
+    return user.normalized_email == PRIMARY_ADMIN_EMAIL
+
+
+def sync_primary_admin(session: Session) -> None:
+    users = list(session.exec(select(User)))
+    changed = False
+    for user in users:
+        should_be_admin = is_primary_admin(user)
+        if user.is_admin == should_be_admin:
+            continue
+        user.is_admin = should_be_admin
+        user.updated_at = utcnow()
+        session.add(user)
+        changed = True
+    if changed:
         session.commit()
 
 

@@ -20,29 +20,36 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from src.auth import (
+    PRIMARY_ADMIN_EMAIL,
     SESSION_COOKIE_NAME,
     authenticate_user,
     clear_session_cookie,
     client_ip,
     create_session_record,
     get_user_for_session_token,
+    hash_password,
+    is_primary_admin,
+    normalize_email,
+    normalize_username,
     require_user,
     revoke_session,
     seed_admin_user,
     set_session_cookie,
+    sync_primary_admin,
 )
 from src.db import engine, get_db_session, init_db
 from src.internal.providers import (
     ConversationMessage,
     ProviderRegistry,
     ProviderMessage,
+    ProviderUsage,
     RunSettings,
     RunSettingsPatch,
     ToolCall,
     ToolResult,
 )
 from src.internal.tools import browser_tool_definitions
-from src.models import Chat, ChatSettings, Message, User, UserPreference, utcnow
+from src.models import Chat, ChatSettings, Message, SessionRecord, UsageEvent, User, UserPreference, utcnow
 
 
 DEV_CORS_ORIGINS = {
@@ -56,6 +63,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 PAGES_DIR = Path(__file__).resolve().parent / "pages"
 LOGIN_PAGE = PAGES_DIR / "login.html"
 APP_PAGE = PAGES_DIR / "index.html"
+ADMIN_PAGE = PAGES_DIR / "admin.html"
 
 provider_registry = ProviderRegistry()
 db_session_dep = Annotated[Session, Depends(get_db_session)]
@@ -479,6 +487,72 @@ def current_user(request: Request, session: Session) -> User:
     return require_user(session, request.cookies.get(SESSION_COOKIE_NAME))
 
 
+def current_admin_user(request: Request, session: Session) -> User:
+    user = current_user(request, session)
+    if not is_primary_admin(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required.")
+    return user
+
+
+def usage_summary_from_events(events: list[UsageEvent]) -> dict[str, Any]:
+    prompt_tokens = sum(event.prompt_tokens for event in events)
+    completion_tokens = sum(event.completion_tokens for event in events)
+    total_tokens = sum(event.total_tokens for event in events)
+    by_provider: dict[str, dict[str, Any]] = {}
+    for event in events:
+        bucket = by_provider.setdefault(
+            event.provider,
+            {
+                "provider": event.provider,
+                "request_count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+        )
+        bucket["request_count"] += 1
+        bucket["prompt_tokens"] += event.prompt_tokens
+        bucket["completion_tokens"] += event.completion_tokens
+        bucket["total_tokens"] += event.total_tokens
+
+    return {
+        "request_count": len(events),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "providers": sorted(by_provider.values(), key=lambda item: item["total_tokens"], reverse=True),
+    }
+
+
+def record_usage_event(
+    *,
+    user_id: str,
+    chat_id: str | None,
+    run_id: str | None,
+    request_kind: str,
+    provider: str,
+    model: str,
+    usage: ProviderUsage | None,
+) -> None:
+    if usage is None:
+        return
+    with Session(engine) as write_session:
+        write_session.add(
+            UsageEvent(
+                user_id=user_id,
+                chat_id=chat_id,
+                run_id=run_id,
+                request_kind=request_kind,
+                provider=provider,
+                model=model,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                total_tokens=usage.total_tokens,
+            )
+        )
+        write_session.commit()
+
+
 class LoginPayload(BaseModel):
     identifier: str
     password: str
@@ -515,6 +589,12 @@ class ToolResultPayload(BaseModel):
     results: list[ToolResult]
 
 
+class AdminUserCreatePayload(BaseModel):
+    username: str
+    email: str
+    password: str
+
+
 app = FastAPI()
 
 allowed_trusted_hosts = trusted_hosts()
@@ -537,9 +617,10 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
-    if should_seed_default_admin():
-        with Session(engine) as session:
+    with Session(engine) as session:
+        if should_seed_default_admin():
             seed_admin_user(session)
+        sync_primary_admin(session)
 
 
 @app.get("/")
@@ -563,6 +644,14 @@ def app_page(request: Request, session: db_session_dep):
     return FileResponse(APP_PAGE)
 
 
+@app.get("/admin")
+def admin_page(request: Request, session: db_session_dep):
+    if optional_page_user(request, session) is None:
+        return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+    current_admin_user(request, session)
+    return FileResponse(ADMIN_PAGE)
+
+
 @app.get("/api/auth/me")
 def auth_me(request: Request, session: db_session_dep):
     user = current_user(request, session)
@@ -570,7 +659,7 @@ def auth_me(request: Request, session: db_session_dep):
         "id": user.id,
         "username": user.username,
         "email": user.email,
-        "is_admin": user.is_admin,
+        "is_admin": is_primary_admin(user),
         "created_at": user.created_at,
     }
 
@@ -605,7 +694,7 @@ def auth_login(
             "id": user.id,
             "username": user.username,
             "email": user.email,
-            "is_admin": user.is_admin,
+            "is_admin": is_primary_admin(user),
         }
     }
 
@@ -614,6 +703,166 @@ def auth_login(
 def auth_logout(request: Request, response: Response, session: db_session_dep):
     revoke_session(session, request.cookies.get(SESSION_COOKIE_NAME))
     clear_session_cookie(response)
+    return {"ok": True}
+
+
+@app.get("/api/admin/overview")
+def admin_overview(request: Request, session: db_session_dep):
+    admin_user = current_admin_user(request, session)
+    users = list(session.exec(select(User).order_by(User.created_at.desc())))
+    users_by_id = {user.id: user for user in users}
+    chats = list(session.exec(select(Chat)))
+    messages = list(session.exec(select(Message)))
+    usage_events = list(
+        session.exec(select(UsageEvent).order_by(UsageEvent.created_at.desc()))
+    )
+
+    chat_by_id = {chat.id: chat for chat in chats}
+    chat_counts: dict[str, int] = defaultdict(int)
+    message_counts: dict[str, int] = defaultdict(int)
+    for chat in chats:
+        if chat.archived_at is None:
+            chat_counts[chat.user_id] += 1
+    for message in messages:
+        chat = chat_by_id.get(message.chat_id)
+        if chat is None or chat.archived_at is not None:
+            continue
+        message_counts[chat.user_id] += 1
+
+    usage_by_user: dict[str, list[UsageEvent]] = defaultdict(list)
+    for event in usage_events:
+        usage_by_user[event.user_id].append(event)
+
+    user_rows = []
+    for user in users:
+        usage_summary = usage_summary_from_events(usage_by_user.get(user.id, []))
+        user_rows.append(
+            {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "is_admin": is_primary_admin(user),
+                "is_active": user.is_active,
+                "created_at": user.created_at,
+                "last_login_at": user.last_login_at,
+                "chat_count": chat_counts.get(user.id, 0),
+                "message_count": message_counts.get(user.id, 0),
+                "usage": usage_summary,
+            }
+        )
+
+    recent_events = [
+        {
+            "id": event.id,
+            "user_id": event.user_id,
+            "username": users_by_id.get(event.user_id).username if users_by_id.get(event.user_id) else "unknown",
+            "email": users_by_id.get(event.user_id).email if users_by_id.get(event.user_id) else "",
+            "provider": event.provider,
+            "model": event.model,
+            "request_kind": event.request_kind,
+            "prompt_tokens": event.prompt_tokens,
+            "completion_tokens": event.completion_tokens,
+            "total_tokens": event.total_tokens,
+            "created_at": event.created_at,
+        }
+        for event in usage_events[:40]
+    ]
+
+    return {
+        "current_user": {
+            "id": admin_user.id,
+            "username": admin_user.username,
+            "email": admin_user.email,
+            "is_admin": True,
+        },
+        "primary_admin_email": PRIMARY_ADMIN_EMAIL,
+        "users": user_rows,
+        "usage": {
+            **usage_summary_from_events(usage_events),
+            "recent_events": recent_events,
+        },
+    }
+
+
+@app.post("/api/admin/users")
+def admin_create_user(
+    payload: AdminUserCreatePayload,
+    request: Request,
+    session: db_session_dep,
+):
+    current_admin_user(request, session)
+    username = payload.username.strip()
+    email = payload.email.strip()
+    password = payload.password
+
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters.")
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    normalized_username = normalize_username(username)
+    normalized_email = normalize_email(email)
+    if session.exec(select(User).where(User.normalized_username == normalized_username)).first():
+        raise HTTPException(status_code=409, detail="That username is already in use.")
+    if session.exec(select(User).where(User.normalized_email == normalized_email)).first():
+        raise HTTPException(status_code=409, detail="That email is already in use.")
+
+    hashed_password, password_salt = hash_password(password)
+    user = User(
+        username=username,
+        normalized_username=normalized_username,
+        email=email,
+        normalized_email=normalized_email,
+        hashed_password=hashed_password,
+        password_salt=password_salt,
+        is_admin=normalized_email == PRIMARY_ADMIN_EMAIL,
+    )
+    session.add(user)
+    session.commit()
+    sync_primary_admin(session)
+    session.refresh(user)
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "is_admin": is_primary_admin(user),
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+    }
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(
+    user_id: str,
+    request: Request,
+    session: db_session_dep,
+):
+    admin_user = current_admin_user(request, session)
+    user = session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if user.id == admin_user.id or user.normalized_email == PRIMARY_ADMIN_EMAIL:
+        raise HTTPException(status_code=400, detail="The primary admin user cannot be removed.")
+
+    chats = list(session.exec(select(Chat).where(Chat.user_id == user.id)))
+    chat_ids = [chat.id for chat in chats]
+    if chat_ids:
+        for message in list(session.exec(select(Message).where(Message.chat_id.in_(chat_ids)))):
+            session.delete(message)
+        for settings_record in list(session.exec(select(ChatSettings).where(ChatSettings.chat_id.in_(chat_ids)))):
+            session.delete(settings_record)
+    for chat in chats:
+        session.delete(chat)
+    for preference in list(session.exec(select(UserPreference).where(UserPreference.user_id == user.id))):
+        session.delete(preference)
+    for usage_event in list(session.exec(select(UsageEvent).where(UsageEvent.user_id == user.id))):
+        session.delete(usage_event)
+    for session_record in list(session.exec(select(SessionRecord).where(SessionRecord.user_id == user.id))):
+        session.delete(session_record)
+    session.delete(user)
+    session.commit()
     return {"ok": True}
 
 
@@ -848,6 +1097,15 @@ async def create_run(
                     history=history,
                     settings=settings,
                     tools=tools or None,
+                )
+                record_usage_event(
+                    user_id=user.id,
+                    chat_id=chat.id,
+                    run_id=run_id,
+                    request_kind="chat_run",
+                    provider=settings.provider,
+                    model=settings.model,
+                    usage=turn.usage,
                 )
                 if not turn.tool_calls and tools:
                     inline_tool_calls = parse_inline_tool_calls(turn.text)

@@ -16,6 +16,7 @@ from src.internal.providers.base import (
     ProviderModelCapability,
     ProviderMessage,
     ProviderTurn,
+    ProviderUsage,
     RunSettings,
     SUPPORTED_REASONING_EFFORTS,
     ToolCall,
@@ -60,6 +61,22 @@ def _decode_content(value) -> str:
             if isinstance(item, dict) and item.get("type") == "text"
         )
     return ""
+
+
+def _usage_from_payload(payload: dict) -> ProviderUsage | None:
+    raw_usage = payload.get("usage")
+    if not isinstance(raw_usage, dict):
+        return None
+    prompt_tokens = int(raw_usage.get("prompt_tokens") or 0)
+    completion_tokens = int(raw_usage.get("completion_tokens") or 0)
+    total_tokens = int(raw_usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+    if prompt_tokens == completion_tokens == total_tokens == 0:
+        return None
+    return ProviderUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
 
 
 class OpenRouterProviderAdapter(ProviderAdapter):
@@ -265,6 +282,7 @@ class OpenRouterProviderAdapter(ProviderAdapter):
         return ProviderTurn(
             text=_decode_content(message.get("content")).strip(),
             tool_calls=tool_calls,
+            usage=_usage_from_payload(payload),
         )
 
     async def stream_text(

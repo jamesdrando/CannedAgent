@@ -306,7 +306,7 @@ pre, code {
 .chat-group-label {
     margin: 0;
     color: var(--muted);
-    font-size: 0.74rem;
+    font-size: 0.7rem;
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -338,7 +338,7 @@ pre, code {
 }
 
 .chat-list-item strong {
-    font-size: 0.96rem;
+    font-size: 0.9rem;
     font-weight: 600;
 }
 
@@ -354,12 +354,21 @@ pre, code {
 }
 
 .chat-list-item small {
-    font-size: 0.76rem;
+    font-size: 0.72rem;
 }
 
 .sidebar-footer {
     display: grid;
     gap: 0.8rem;
+}
+
+.sidebar-footer-actions {
+    display: flex;
+    gap: 0.55rem;
+}
+
+.sidebar-footer-actions > .ghost-button {
+    flex: 1 1 0;
 }
 
 .user-card {
@@ -388,7 +397,7 @@ pre, code {
 
 .user-meta span {
     color: var(--muted);
-    font-size: 0.84rem;
+    font-size: 0.8rem;
 }
 
 .conversation-panel {

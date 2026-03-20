@@ -19,6 +19,7 @@ const elements = {
     userName: document.getElementById("user-name"),
     userEmail: document.getElementById("user-email"),
     userAvatar: document.getElementById("user-avatar"),
+    adminButton: document.getElementById("admin-button"),
     newChatButton: document.getElementById("new-chat-button"),
     renameChatButton: document.getElementById("rename-chat-button"),
     deleteChatButton: document.getElementById("delete-chat-button"),
@@ -771,6 +772,7 @@ function renderUser() {
     elements.userName.textContent = state.user.username;
     elements.userEmail.textContent = state.user.email;
     elements.userAvatar.textContent = state.user.username[0].toUpperCase();
+    elements.adminButton.hidden = !state.user.is_admin;
 }
 
 function renderTitle() {
@@ -1481,6 +1483,10 @@ elements.deleteChatButton.addEventListener("click", async () => {
 
 elements.logoutButton.addEventListener("click", async () => {
     await logout();
+});
+
+elements.adminButton.addEventListener("click", () => {
+    window.location.href = "/admin";
 });
 
 elements.chatList.addEventListener("click", async (event) => {

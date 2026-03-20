@@ -16,6 +16,7 @@ from src.internal.providers.base import (
     ProviderModelCapability,
     ProviderMessage,
     ProviderTurn,
+    ProviderUsage,
     RunSettings,
     ToolCall,
     ToolDefinition,
@@ -82,6 +83,22 @@ def _canonical_tool_name(name: str) -> str:
         "python_execute": "python.execute",
     }
     return known_names.get(name, name)
+
+
+def _usage_from_payload(payload: dict) -> ProviderUsage | None:
+    raw_usage = payload.get("usage")
+    if not isinstance(raw_usage, dict):
+        return None
+    prompt_tokens = int(raw_usage.get("prompt_tokens") or 0)
+    completion_tokens = int(raw_usage.get("completion_tokens") or 0)
+    total_tokens = int(raw_usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+    if prompt_tokens == completion_tokens == total_tokens == 0:
+        return None
+    return ProviderUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
 
 
 class OpenAIProviderAdapter(ProviderAdapter):
@@ -285,6 +302,7 @@ class OpenAIProviderAdapter(ProviderAdapter):
         return ProviderTurn(
             text=_decode_content(message.get("content")).strip(),
             tool_calls=tool_calls,
+            usage=_usage_from_payload(payload),
         )
 
     async def stream_text(
