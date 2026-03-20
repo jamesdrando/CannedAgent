@@ -1229,10 +1229,11 @@ pre, code {
     .app-layout.settings-open .settings-drawer {
         transform: translateY(0);
     }
-
+    
+    /* 
     .chat-list {
         max-height: 180px;
-    }
+    } */
 
     .sidebar-toggle {
         display: inline-flex;

@@ -454,10 +454,23 @@ def _validate_python(code):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in BLOCKED_CALLS:
                 raise ValueError(f"Call to '{node.func.id}' is not allowed.")
+    return tree
+
+def _split_last_expression(tree):
+    body = list(tree.body)
+    final_expression = None
+    if body and isinstance(body[-1], ast.Expr):
+        final_expression = ast.Expression(body.pop().value)
+    exec_tree = ast.Module(body=body, type_ignores=[])
+    ast.fix_missing_locations(exec_tree)
+    if final_expression is not None:
+        ast.fix_missing_locations(final_expression)
+    return exec_tree, final_expression
 
 def tool_python_execute(payload, args):
     code = args["code"]
-    _validate_python(code)
+    tree = _validate_python(code)
+    exec_tree, final_expression = _split_last_expression(tree)
     selected = _select_files(payload, args.get("file_ids"))
     available_files = {
         item["id"]: {
@@ -501,8 +514,11 @@ def tool_python_execute(payload, args):
     }
     locals_dict = {}
     with redirect_stdout(stdout):
-        exec(compile(code, "<jobbr-python>", "exec"), globals_dict, locals_dict)
-    result_value = locals_dict.get("result")
+        exec(compile(exec_tree, "<jobbr-python>", "exec"), globals_dict, locals_dict)
+        final_value = None
+        if final_expression is not None:
+            final_value = eval(compile(final_expression, "<jobbr-python>", "eval"), globals_dict, locals_dict)
+    result_value = locals_dict["result"] if "result" in locals_dict else final_value
     text_output = stdout.getvalue().strip()
     result_payload = {
         "stdout": text_output[:12000],
