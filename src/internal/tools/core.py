@@ -88,7 +88,10 @@ BROWSER_TOOL_DEFINITIONS: list[ToolDefinition] = [
         description=(
             "Execute constrained Python against browser-local files in the in-page Pyodide sandbox. "
             "Available files live under /session and can be discovered via files.list. "
-            "Use only safe, bounded analysis code and do not attempt network, process, or package-management access."
+            "`pd`, `np`, `math`, `statistics`, `files`, `list_files()`, `file_info()`, "
+            "`read_table(file_id_or_name)`, and `read_text(file_id_or_name)` are preloaded, so imports are optional. "
+            "Use raw Python only when the other file/table tools are insufficient and do not attempt network, "
+            "process, or package-management access."
         ),
         parameters={
             "type": "object",

@@ -1,9 +1,17 @@
 const PYODIDE_VERSION = "0.29.3";
 const PYODIDE_BASE_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
+const CORE_PACKAGES = ["numpy", "pandas"];
+const OPTIONAL_PACKAGE_LABELS = {
+    docx: "lxml",
+    pdf: "PyMuPDF",
+    xlsx: "openpyxl",
+};
 
 let pyodide = null;
 let readyPromise = null;
 const sessionFiles = new Map();
+const loadedOptionalPackages = new Set();
+const optionalPackagePromises = new Map();
 
 function removeFsPath(path) {
     if (!pyodide) return;
@@ -24,16 +32,69 @@ function resetSessionFiles() {
     sessionFiles.clear();
 }
 
+async function ensureOptionalPackage(kind) {
+    if (!OPTIONAL_PACKAGE_LABELS[kind] || loadedOptionalPackages.has(kind)) return;
+    if (optionalPackagePromises.has(kind)) {
+        await optionalPackagePromises.get(kind);
+        return;
+    }
+
+    const promise = (async () => {
+        await ensureReady();
+        if (kind === "docx") {
+            await pyodide.loadPackage(["lxml"]);
+        } else if (kind === "pdf") {
+            await pyodide.loadPackage(["PyMuPDF"]);
+        } else if (kind === "xlsx") {
+            await pyodide.loadPackage(["micropip"]);
+            await pyodide.runPythonAsync(`
+import micropip
+await micropip.install("openpyxl==3.1.5")
+            `);
+        }
+        loadedOptionalPackages.add(kind);
+    })();
+
+    optionalPackagePromises.set(kind, promise);
+    try {
+        await promise;
+    } finally {
+        optionalPackagePromises.delete(kind);
+    }
+}
+
+function selectedFilesForTool(tool, args = {}) {
+    if (tool === "files.read_text" || tool === "tables.preview" || tool === "tables.profile") {
+        const file = sessionFiles.get(args.file_id);
+        return file ? [file] : [];
+    }
+
+    if (tool === "files.describe" || tool === "python.execute") {
+        const requestedIds = Array.isArray(args.file_ids) && args.file_ids.length
+            ? args.file_ids
+            : [...sessionFiles.keys()];
+        return requestedIds
+            .map((fileId) => sessionFiles.get(fileId))
+            .filter(Boolean);
+    }
+
+    return [];
+}
+
+async function ensureToolDependencies(tool, args = {}) {
+    const files = selectedFilesForTool(tool, args);
+    const kinds = [...new Set(files.map((file) => file.kind).filter(Boolean))];
+    for (const kind of kinds) {
+        await ensureOptionalPackage(kind);
+    }
+}
+
 async function ensureReady() {
     if (readyPromise) return readyPromise;
     readyPromise = (async () => {
         importScripts(`${PYODIDE_BASE_URL}pyodide.js`);
         pyodide = await loadPyodide({ indexURL: PYODIDE_BASE_URL });
-        await pyodide.loadPackage(["micropip", "pandas", "numpy", "lxml", "PyMuPDF"]);
-        await pyodide.runPythonAsync(`
-import micropip
-await micropip.install("openpyxl==3.1.5")
-        `);
+        await pyodide.loadPackage(CORE_PACKAGES);
         await pyodide.runPythonAsync(`
 import ast
 import io
@@ -47,18 +108,20 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from lxml import etree
-import fitz
 
 TEXT_KINDS = {"txt", "md", "json", "csv", "tsv"}
 TABLE_KINDS = {"csv", "tsv", "json", "xlsx"}
 ALLOWED_IMPORTS = {
     "collections",
     "csv",
+    "datetime",
+    "fitz",
     "io",
     "json",
+    "lxml",
     "math",
     "numpy",
+    "openpyxl",
     "pandas",
     "pathlib",
     "re",
@@ -80,29 +143,50 @@ BLOCKED_IMPORT_PREFIXES = {
     "urllib",
 }
 BLOCKED_CALLS = {"eval", "exec", "compile", "__import__", "input", "breakpoint"}
+_NATIVE_IMPORT = __import__
+
+def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    root = name.split(".")[0]
+    if root in BLOCKED_IMPORT_PREFIXES or root not in ALLOWED_IMPORTS:
+        raise ImportError(f"Import '{root}' is not allowed.")
+    return _NATIVE_IMPORT(name, globals, locals, fromlist, level)
 
 SAFE_BUILTINS = {
+    "__import__": _safe_import,
     "abs": abs,
     "all": all,
     "any": any,
     "bool": bool,
+    "bytes": bytes,
     "dict": dict,
     "enumerate": enumerate,
+    "Exception": Exception,
+    "filter": filter,
     "float": float,
+    "getattr": getattr,
+    "hasattr": hasattr,
     "int": int,
+    "isinstance": isinstance,
     "len": len,
     "list": list,
+    "map": map,
     "max": max,
     "min": min,
+    "next": next,
+    "object": object,
     "open": open,
+    "pow": pow,
     "print": print,
     "range": range,
+    "reversed": reversed,
     "round": round,
     "set": set,
     "sorted": sorted,
     "str": str,
     "sum": sum,
     "tuple": tuple,
+    "type": type,
+    "ValueError": ValueError,
     "zip": zip,
 }
 
@@ -130,6 +214,16 @@ def _select_files(payload, file_ids):
     wanted = set(file_ids)
     return [item for item in files if item["id"] in wanted]
 
+def _resolve_file_reference(available_files, file_ref):
+    if file_ref in available_files:
+        return available_files[file_ref]
+    matches = [item for item in available_files.values() if item["name"] == file_ref]
+    if not matches:
+        raise ValueError(f"Unknown file reference: {file_ref}")
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous file reference: {file_ref}")
+    return matches[0]
+
 def _load_json_table(path):
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         data = json.load(handle)
@@ -155,6 +249,8 @@ def _load_dataframe(file_meta):
     raise ValueError(f"{file_meta['name']} is not a structured table file.")
 
 def _extract_docx_text(path):
+    from lxml import etree
+
     with zipfile.ZipFile(path) as archive:
         xml = archive.read("word/document.xml")
     root = etree.fromstring(xml)
@@ -162,6 +258,8 @@ def _extract_docx_text(path):
     return "\\n".join(fragment.strip() for fragment in text_nodes if fragment and fragment.strip())
 
 def _extract_pdf_text(path):
+    import fitz
+
     document = fitz.open(path)
     text_parts = []
     try:
@@ -326,6 +424,19 @@ def tool_python_execute(payload, args):
         }
         for item in selected
     }
+    def list_files():
+        return list(available_files.values())
+
+    def file_info(file_ref):
+        return dict(_resolve_file_reference(available_files, file_ref))
+
+    def read_table(file_ref):
+        return _load_dataframe(_resolve_file_reference(available_files, file_ref))
+
+    def read_text(file_ref, max_chars=6000):
+        file_meta = _resolve_file_reference(available_files, file_ref)
+        return _read_text(file_meta, min(int(max_chars or 6000), 24000))
+
     stdout = io.StringIO()
     globals_dict = {
         "__builtins__": SAFE_BUILTINS,
@@ -337,6 +448,10 @@ def tool_python_execute(payload, args):
         "statistics": statistics,
         "Path": Path,
         "Counter": Counter,
+        "list_files": list_files,
+        "file_info": file_info,
+        "read_table": read_table,
+        "read_text": read_text,
     }
     locals_dict = {}
     with redirect_stdout(stdout):
@@ -370,7 +485,11 @@ def invoke_tool_json(tool_name, payload_json):
         raise ValueError(f"Unsupported tool: {tool_name}")
     return json.dumps(_json_safe(result))
         `);
-        return { version: PYODIDE_VERSION };
+        return {
+            version: PYODIDE_VERSION,
+            core_packages: CORE_PACKAGES,
+            optional_packages_loaded: [...loadedOptionalPackages].map((kind) => OPTIONAL_PACKAGE_LABELS[kind]),
+        };
     })();
     return readyPromise;
 }
@@ -461,6 +580,7 @@ self.onmessage = async (event) => {
             if (args.tool === "files.list") {
                 output = listFilesOutput();
             } else {
+                await ensureToolDependencies(args.tool, args.args || {});
                 output = await invokePythonTool(args.tool, args.args || {});
             }
             self.postMessage({ id, ok: true, output });

@@ -208,9 +208,11 @@ def tool_content_for_model(result: ToolResult) -> str:
 
 def browser_tool_usage_guidance() -> str:
     return (
-        "Browser-local files are available for this run only. "
+        "Browser-local files from the workspace are available for this run only when they are included in the current manifest. "
         "They are not stored on the Jobbr website and should be accessed via the available tools.\n"
         "If you need file inspection or analysis, use the provider's native tool/function calling mechanism.\n"
+        "In python.execute, pd, np, math, statistics, files, list_files(), file_info(), "
+        "read_table(file_id_or_name), and read_text(file_id_or_name) are already available, so imports are optional.\n"
         "Prefer the minimum number of tool calls needed. If a tool result already answers the user's question, "
         "respond directly instead of calling more tools.\n"
         "Do not print tool invocations as plain text, JSON blobs, XML, or wrappers such as TOOLCALL>...ALL>.\n"

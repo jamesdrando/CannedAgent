@@ -6,6 +6,9 @@ const md = window.markdownit({
 });
 
 const DRAFT_CHAT_ID = "__draft__";
+const ATTACHMENT_DB_NAME = "jobbr-local-files";
+const ATTACHMENT_DB_VERSION = 1;
+const ATTACHMENT_STORE_NAME = "attachments";
 
 const elements = {
     appLayout: document.querySelector(".app-layout"),
@@ -69,9 +72,11 @@ const state = {
     settingsFeedbackTone: "muted",
     activeRunId: null,
     attachments: [],
+    attachmentSessionNeedsSync: false,
     toolStatuses: [],
     attachmentSupport: {
         supported: typeof Worker !== "undefined" && typeof WebAssembly !== "undefined",
+        persistence: typeof indexedDB !== "undefined" ? "browser" : "session",
         ready: false,
         busy: false,
         message: "Local analysis loads on first file add and stays in this page session.",
@@ -129,11 +134,166 @@ function formatFileSize(bytes) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-class PyodideBridge {
+function attachmentCountLabel(count) {
+    return `${count} workspace file${count === 1 ? "" : "s"}`;
+}
+
+function totalAttachmentBytes() {
+    return state.attachments.reduce((total, attachment) => total + (attachment.size_bytes || 0), 0);
+}
+
+function defaultAttachmentStatusMessage() {
+    if (!state.attachments.length) {
+        return state.attachmentSupport.persistence === "browser"
+            ? "Local analysis warms in the background. Files stay in this browser until you remove them."
+            : "Local analysis loads on first file add and stays in this page session.";
+    }
+
+    const persistedCount = state.attachments.filter((attachment) => attachment.persistence === "browser").length;
+    let storageCopy = "Stored for this page session.";
+    if (persistedCount === state.attachments.length) {
+        storageCopy = "Stored in this browser.";
+    } else if (persistedCount > 0) {
+        storageCopy = `${persistedCount} stored in this browser.`;
+    }
+    return `${attachmentCountLabel(state.attachments.length)} ready for local analysis. ${storageCopy}`;
+}
+
+function defaultAttachmentPrivacyMessage() {
+    return state.attachmentSupport.persistence === "browser"
+        ? "Files stay on this device inside this browser and are never uploaded to the Jobbr website. Remove them anytime from Workspace files."
+        : "Files are not uploaded to the internet or stored on the Jobbr website. They only exist while this page stays open.";
+}
+
+function setDefaultAttachmentStatus({ busy = false, ready = state.attachmentSupport.ready } = {}) {
+    setAttachmentStatus(defaultAttachmentStatusMessage(), { busy, ready });
+}
+
+class AttachmentVault {
     constructor() {
+        this.supported = typeof indexedDB !== "undefined";
+        this.dbPromise = null;
+    }
+
+    disable() {
+        this.supported = false;
+        this.dbPromise = null;
+    }
+
+    async open() {
+        if (!this.supported) {
+            throw new Error("Browser file persistence is unavailable.");
+        }
+        if (this.dbPromise) {
+            return this.dbPromise;
+        }
+
+        this.dbPromise = new Promise((resolve, reject) => {
+            const request = indexedDB.open(ATTACHMENT_DB_NAME, ATTACHMENT_DB_VERSION);
+            request.addEventListener("upgradeneeded", () => {
+                const database = request.result;
+                if (!database.objectStoreNames.contains(ATTACHMENT_STORE_NAME)) {
+                    database.createObjectStore(ATTACHMENT_STORE_NAME, { keyPath: "id" });
+                }
+            });
+            request.addEventListener("success", () => {
+                resolve(request.result);
+            });
+            request.addEventListener("error", () => {
+                reject(request.error || new Error("Unable to open browser file storage."));
+            });
+        }).catch((error) => {
+            this.disable();
+            throw error;
+        });
+
+        return this.dbPromise;
+    }
+
+    async list() {
+        const database = await this.open();
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction(ATTACHMENT_STORE_NAME, "readonly");
+            const store = transaction.objectStore(ATTACHMENT_STORE_NAME);
+            const request = store.getAll();
+            request.addEventListener("success", () => resolve(request.result || []));
+            request.addEventListener("error", () => reject(request.error || new Error("Unable to read browser files.")));
+        });
+    }
+
+    async save(record, file) {
+        const database = await this.open();
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction(ATTACHMENT_STORE_NAME, "readwrite");
+            const store = transaction.objectStore(ATTACHMENT_STORE_NAME);
+            const request = store.put({
+                id: record.id,
+                name: record.name,
+                mime_type: record.mime_type,
+                size_bytes: record.size_bytes,
+                kind: record.kind,
+                path: record.path,
+                last_modified: record.last_modified,
+                saved_at: record.saved_at,
+                blob: file,
+            });
+            request.addEventListener("success", () => resolve(true));
+            request.addEventListener("error", () => reject(request.error || new Error("Unable to persist browser file.")));
+        });
+    }
+
+    async delete(attachmentId) {
+        const database = await this.open();
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction(ATTACHMENT_STORE_NAME, "readwrite");
+            const store = transaction.objectStore(ATTACHMENT_STORE_NAME);
+            const request = store.delete(attachmentId);
+            request.addEventListener("success", () => resolve(true));
+            request.addEventListener("error", () => reject(request.error || new Error("Unable to remove browser file.")));
+        });
+    }
+
+    async clear() {
+        const database = await this.open();
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction(ATTACHMENT_STORE_NAME, "readwrite");
+            const store = transaction.objectStore(ATTACHMENT_STORE_NAME);
+            const request = store.clear();
+            request.addEventListener("success", () => resolve(true));
+            request.addEventListener("error", () => reject(request.error || new Error("Unable to clear browser files.")));
+        });
+    }
+}
+
+const attachmentVault = new AttachmentVault();
+
+function hydrateStoredAttachment(item) {
+    const file = item.blob instanceof File
+        ? item.blob
+        : new File([item.blob], item.name, {
+            type: item.mime_type || "application/octet-stream",
+            lastModified: item.last_modified || Date.now(),
+        });
+    return {
+        id: item.id,
+        name: item.name,
+        mime_type: item.mime_type || "application/octet-stream",
+        size_bytes: item.size_bytes || file.size,
+        kind: item.kind,
+        path: item.path,
+        last_modified: item.last_modified || file.lastModified || Date.now(),
+        saved_at: item.saved_at || new Date().toISOString(),
+        persistence: "browser",
+        file,
+    };
+}
+
+class PyodideBridge {
+    constructor({ onReset } = {}) {
         this.worker = null;
         this.pending = new Map();
         this.readyPromise = null;
+        this.onReset = typeof onReset === "function" ? onReset : null;
     }
 
     ensureWorker() {
@@ -155,6 +315,7 @@ class PyodideBridge {
             this.rejectAll(new Error("Local analysis runtime crashed."));
             this.worker = null;
             this.readyPromise = null;
+            this.onReset?.();
         });
     }
 
@@ -216,7 +377,7 @@ class PyodideBridge {
 
     async runTool(name, args) {
         await this.initialize();
-        const timeoutMs = name === "python.execute" ? 15000 : 12000;
+        const timeoutMs = name === "python.execute" ? 45000 : 30000;
         const { output } = await this.request("tool", { tool: name, args }, { timeoutMs });
         return output;
     }
@@ -228,12 +389,22 @@ class PyodideBridge {
         }
         this.rejectAll(new Error("Local analysis runtime was reset."));
         this.readyPromise = null;
+        this.onReset?.();
+    }
+}
+
+function markAttachmentSessionDirty() {
+    state.attachmentSessionNeedsSync = state.attachments.length > 0;
+    state.attachmentSupport.ready = false;
+    if (!state.attachmentSupport.busy) {
+        state.attachmentSupport.message = defaultAttachmentStatusMessage();
+        requestRender();
     }
 }
 
 function ensurePyodideBridge() {
     if (!pyodideBridge) {
-        pyodideBridge = new PyodideBridge();
+        pyodideBridge = new PyodideBridge({ onReset: markAttachmentSessionDirty });
     }
     return pyodideBridge;
 }
@@ -371,7 +542,7 @@ async function ensureAttachmentRuntime() {
     try {
         setAttachmentStatus("Preparing local analysis runtime...", { busy: true, ready: false });
         await ensurePyodideBridge().initialize();
-        setAttachmentStatus("Local analysis stays in this page session.", { busy: false, ready: true });
+        setDefaultAttachmentStatus({ busy: false, ready: true });
     } catch (error) {
         setAttachmentStatus(
             error instanceof Error ? error.message : "Unable to start local analysis runtime.",
@@ -400,6 +571,17 @@ function removeCompletedToolStatuses() {
     state.toolStatuses = state.toolStatuses.filter((item) => item.status !== "completed");
 }
 
+function attachmentPayload(attachment) {
+    return {
+        id: attachment.id,
+        name: attachment.name,
+        mime_type: attachment.mime_type,
+        size_bytes: attachment.size_bytes,
+        kind: attachment.kind,
+        path: attachment.path,
+    };
+}
+
 function attachmentRecordFromFile(file) {
     const kind = attachmentKind(file);
     return {
@@ -409,8 +591,50 @@ function attachmentRecordFromFile(file) {
         size_bytes: file.size,
         kind,
         path: `/session/${createRequestId("blob")}_${sanitizeFileName(file.name)}`,
+        last_modified: file.lastModified || Date.now(),
+        saved_at: new Date().toISOString(),
+        persistence: "session",
         file,
     };
+}
+
+async function persistAttachmentRecord(record, file) {
+    if (!attachmentVault.supported) return false;
+    try {
+        await attachmentVault.save(record, file);
+        return true;
+    } catch (error) {
+        if (!attachmentVault.supported) {
+            state.attachmentSupport.persistence = "session";
+        }
+        return false;
+    }
+}
+
+async function restorePersistedAttachments() {
+    if (!attachmentVault.supported) {
+        state.attachmentSupport.persistence = "session";
+        setDefaultAttachmentStatus({ busy: false, ready: false });
+        requestRender();
+        return;
+    }
+
+    try {
+        const items = await attachmentVault.list();
+        state.attachmentSupport.persistence = "browser";
+        state.attachments = items.map(hydrateStoredAttachment);
+        state.attachmentSessionNeedsSync = state.attachments.length > 0;
+        setDefaultAttachmentStatus({ busy: false, ready: false });
+    } catch (error) {
+        state.attachmentSupport.persistence = "session";
+        state.attachments = [];
+        state.attachmentSessionNeedsSync = false;
+        setAttachmentStatus(
+            "Local analysis loads on first file add. Browser file persistence is unavailable here.",
+            { busy: false, ready: false },
+        );
+    }
+    requestRender();
 }
 
 async function addAttachments(fileList) {
@@ -422,6 +646,9 @@ async function addAttachments(fileList) {
     }
 
     await ensureAttachmentRuntime();
+    if (state.attachmentSessionNeedsSync) {
+        await rebuildAttachmentSession({ force: true });
+    }
 
     for (const file of files) {
         const kind = attachmentKind(file);
@@ -433,17 +660,14 @@ async function addAttachments(fileList) {
         const record = attachmentRecordFromFile(file);
         record.kind = kind;
         try {
-            setAttachmentStatus(`Adding ${file.name} to the local workspace...`, { busy: true, ready: true });
-            await ensurePyodideBridge().addAttachment({
-                id: record.id,
-                name: record.name,
-                mime_type: record.mime_type,
-                size_bytes: record.size_bytes,
-                kind: record.kind,
-                path: record.path,
-            }, file);
+            setAttachmentStatus(`Adding ${file.name} to Workspace files...`, { busy: true, ready: true });
+            await ensurePyodideBridge().addAttachment(attachmentPayload(record), file);
+            if (await persistAttachmentRecord(record, file)) {
+                record.persistence = "browser";
+            }
             state.attachments.push(record);
-            setAttachmentStatus("Local analysis stays in this page session.", { busy: false, ready: true });
+            state.attachmentSessionNeedsSync = false;
+            setDefaultAttachmentStatus({ busy: false, ready: true });
         } catch (error) {
             setAttachmentStatus(
                 error instanceof Error ? error.message : `Unable to add ${file.name}.`,
@@ -457,48 +681,106 @@ async function addAttachments(fileList) {
 }
 
 async function removeAttachment(attachmentId) {
+    const attachment = state.attachments.find((item) => item.id === attachmentId) || null;
     state.attachments = state.attachments.filter((item) => item.id !== attachmentId);
     clearToolStatuses();
-    if (pyodideBridge) {
-        await pyodideBridge.clearSession();
-        for (const attachment of state.attachments) {
-            await ensurePyodideBridge().addAttachment({
-                id: attachment.id,
-                name: attachment.name,
-                mime_type: attachment.mime_type,
-                size_bytes: attachment.size_bytes,
-                kind: attachment.kind,
-                path: attachment.path,
-            }, attachment.file);
+
+    if (attachment?.persistence === "browser" && attachmentVault.supported) {
+        try {
+            await attachmentVault.delete(attachmentId);
+        } catch (error) {
+            // Session state still wins even if browser cleanup misses once.
         }
     }
-    setAttachmentStatus("Local analysis stays in this page session.", { busy: false, ready: true });
+
+    if (state.attachments.length) {
+        await rebuildAttachmentSession({ force: true });
+    } else if (pyodideBridge) {
+        await pyodideBridge.clearSession();
+        state.attachmentSessionNeedsSync = false;
+        setDefaultAttachmentStatus({ busy: false, ready: Boolean(pyodideBridge.readyPromise) });
+    } else {
+        state.attachmentSessionNeedsSync = false;
+        setDefaultAttachmentStatus({ busy: false, ready: false });
+    }
+
     requestRender();
 }
 
-async function resetAttachments() {
+async function resetAttachments({ clearStorage = true } = {}) {
     state.attachments = [];
+    state.attachmentSessionNeedsSync = false;
     clearToolStatuses();
     if (pyodideBridge) {
         await pyodideBridge.clearSession();
     }
+    if (clearStorage && attachmentVault.supported) {
+        try {
+            await attachmentVault.clear();
+        } catch (error) {
+            // Clearing the active workspace matters more than background cache cleanup.
+        }
+    }
+    setDefaultAttachmentStatus({ busy: false, ready: Boolean(pyodideBridge?.readyPromise) });
     requestRender();
 }
 
-async function rebuildAttachmentSession() {
-    if (!state.attachments.length) return;
+async function rebuildAttachmentSession({ force = false } = {}) {
+    if (!state.attachments.length) {
+        state.attachmentSessionNeedsSync = false;
+        return;
+    }
+    if (!force && !state.attachmentSessionNeedsSync) {
+        return;
+    }
+
     await ensureAttachmentRuntime();
+    setAttachmentStatus(`Syncing ${attachmentCountLabel(state.attachments.length)} to local analysis...`, {
+        busy: true,
+        ready: true,
+    });
     await ensurePyodideBridge().clearSession();
     for (const attachment of state.attachments) {
-        await ensurePyodideBridge().addAttachment({
-            id: attachment.id,
-            name: attachment.name,
-            mime_type: attachment.mime_type,
-            size_bytes: attachment.size_bytes,
-            kind: attachment.kind,
-            path: attachment.path,
-        }, attachment.file);
+        await ensurePyodideBridge().addAttachment(attachmentPayload(attachment), attachment.file);
     }
+    state.attachmentSessionNeedsSync = false;
+    setDefaultAttachmentStatus({ busy: false, ready: true });
+}
+
+function scheduleAttachmentWarmup() {
+    if (!state.attachmentSupport.supported || !activeProviderSupportsBrowserTools()) return;
+    if (state.attachmentSupport.busy) return;
+    if (pyodideBridge?.readyPromise && !state.attachmentSessionNeedsSync) return;
+
+    const warmRuntime = async () => {
+        try {
+            setAttachmentStatus(
+                state.attachments.length
+                    ? `Warming local analysis for ${attachmentCountLabel(state.attachments.length)}...`
+                    : "Warming local analysis runtime...",
+                { busy: true, ready: false },
+            );
+            await ensurePyodideBridge().initialize();
+            if (state.attachmentSessionNeedsSync) {
+                await rebuildAttachmentSession({ force: true });
+                return;
+            }
+            setDefaultAttachmentStatus({ busy: false, ready: true });
+        } catch (error) {
+            setDefaultAttachmentStatus({ busy: false, ready: false });
+        }
+    };
+
+    if ("requestIdleCallback" in window) {
+        window.requestIdleCallback(() => {
+            warmRuntime().catch(() => {});
+        }, { timeout: 1800 });
+        return;
+    }
+
+    window.setTimeout(() => {
+        warmRuntime().catch(() => {});
+    }, 240);
 }
 
 async function parseError(response) {
@@ -731,6 +1013,7 @@ function renderAttachments() {
     const providerSupportsTools = activeProviderSupportsBrowserTools();
     elements.attachmentInput.disabled = state.streaming || !providerSupportsTools;
     elements.attachmentPrivacy.hidden = !state.attachmentSupport.supported;
+    elements.attachmentPrivacy.textContent = defaultAttachmentPrivacyMessage();
 
     let attachmentStatusMessage = "";
     if (!state.attachmentSupport.supported) {
@@ -750,21 +1033,49 @@ function renderAttachments() {
         return;
     }
 
+    const totalBytes = formatFileSize(totalAttachmentBytes());
+    const persistedCount = state.attachments.filter((attachment) => attachment.persistence === "browser").length;
+    const storageSummary = persistedCount === state.attachments.length
+        ? "Stored in this browser"
+        : (persistedCount > 0 ? `${persistedCount} stored in this browser` : "Session only");
+
     elements.attachmentTray.hidden = false;
-    elements.attachmentTray.innerHTML = state.attachments.map((attachment) => `
-        <div class="attachment-chip">
-            <strong>${escapeHtml(attachment.name)}</strong>
-            <span>${escapeHtml(attachment.kind.toUpperCase())} · ${escapeHtml(formatFileSize(attachment.size_bytes))}</span>
-            <button
-                type="button"
-                class="attachment-remove"
-                data-attachment-id="${escapeHtml(attachment.id)}"
-                aria-label="Remove ${escapeHtml(attachment.name)}"
-            >
-                Remove
-            </button>
-        </div>
-    `).join("");
+    elements.attachmentTray.innerHTML = `
+        <section class="attachment-manager">
+            <div class="attachment-manager-header">
+                <div>
+                    <p class="attachment-manager-kicker">Workspace files</p>
+                    <strong>${escapeHtml(attachmentCountLabel(state.attachments.length))} available to you and the model</strong>
+                </div>
+                <button type="button" class="ghost-button attachment-clear-button" data-attachment-action="clear-all">
+                    Clear all
+                </button>
+            </div>
+            <p class="attachment-manager-summary">${escapeHtml(`${totalBytes} · ${storageSummary}`)}</p>
+            <div class="attachment-list">
+                ${state.attachments.map((attachment) => `
+                    <div class="attachment-item">
+                        <div class="attachment-item-copy">
+                            <strong>${escapeHtml(attachment.name)}</strong>
+                            <span>${escapeHtml(
+                                `${attachment.kind.toUpperCase()} · ${formatFileSize(attachment.size_bytes)} · ${
+                                    attachment.persistence === "browser" ? "Stored in browser" : "Session only"
+                                }`
+                            )}</span>
+                        </div>
+                        <button
+                            type="button"
+                            class="attachment-remove"
+                            data-attachment-id="${escapeHtml(attachment.id)}"
+                            aria-label="Remove ${escapeHtml(attachment.name)}"
+                        >
+                            Remove
+                        </button>
+                    </div>
+                `).join("")}
+            </div>
+        </section>
+    `;
 }
 
 function renderUser() {
@@ -914,7 +1225,7 @@ function syncControls() {
         state.streaming
         || !elements.input.value.trim()
         || (state.attachments.length > 0 && !activeProviderSupportsBrowserTools())
-        || state.attachmentSupport.busy
+        || (state.attachments.length > 0 && state.attachmentSupport.busy)
     );
     elements.renameChatButton.disabled = !state.currentChatId || state.currentChatId === DRAFT_CHAT_ID || state.streaming;
     elements.deleteChatButton.disabled = !state.currentChatId || state.currentChatId === DRAFT_CHAT_ID || state.streaming;
@@ -1115,6 +1426,16 @@ function summarizeToolOutput(output) {
     return serialized.length > 4000 ? `${serialized.slice(0, 3997)}...` : serialized;
 }
 
+function isRecoverableRuntimeError(error) {
+    const message = String(error || "").toLowerCase();
+    return (
+        message.includes("timed out")
+        || message.includes("restarted")
+        || message.includes("reset")
+        || message.includes("crashed")
+    );
+}
+
 async function executeBrowserToolCall(toolCall, assistantMessage) {
     setToolStatus(toolCall.tool_call_id, toolCall.name, "running");
     syncAssistantToolState(assistantMessage);
@@ -1132,6 +1453,29 @@ async function executeBrowserToolCall(toolCall, assistantMessage) {
             summary_for_model: summarizeToolOutput(output),
         };
     } catch (error) {
+        if (state.attachments.length && isRecoverableRuntimeError(error)) {
+            try {
+                setAttachmentStatus("Recovering Workspace files after a local runtime reset...", {
+                    busy: true,
+                    ready: false,
+                });
+                state.attachmentSessionNeedsSync = true;
+                await rebuildAttachmentSession({ force: true });
+                const output = await ensurePyodideBridge().runTool(toolCall.name, toolCall.arguments || {});
+                setToolStatus(toolCall.tool_call_id, toolCall.name, "completed");
+                syncAssistantToolState(assistantMessage);
+                requestRender();
+                return {
+                    tool_call_id: toolCall.tool_call_id,
+                    name: toolCall.name,
+                    output,
+                    summary_for_model: summarizeToolOutput(output),
+                };
+            } catch (retryError) {
+                error = retryError;
+            }
+        }
+
         setToolStatus(toolCall.tool_call_id, toolCall.name, "failed");
         syncAssistantToolState(assistantMessage);
         requestRender();
@@ -1391,6 +1735,9 @@ function handleSettingsProviderChange() {
         reasoning_effort: null,
     });
     markSettingsDirty();
+    if (provider.supports_browser_tools) {
+        scheduleAttachmentWarmup();
+    }
 }
 
 function handleSettingsModelInput() {
@@ -1511,6 +1858,19 @@ elements.attachmentInput.addEventListener("change", async (event) => {
 });
 
 elements.attachmentTray.addEventListener("click", async (event) => {
+    const clearButton = event.target.closest("[data-attachment-action='clear-all']");
+    if (clearButton) {
+        try {
+            await resetAttachments({ clearStorage: true });
+        } catch (error) {
+            setAttachmentStatus(
+                error instanceof Error ? error.message : "Unable to clear Workspace files.",
+                { busy: false, ready: false },
+            );
+        }
+        return;
+    }
+
     const button = event.target.closest("[data-attachment-id]");
     if (!button) return;
     try {
@@ -1614,9 +1974,12 @@ async function init() {
     await fetchChats();
     if (!state.attachmentSupport.supported) {
         setAttachmentStatus("This browser does not support local file analysis.", { ready: false });
+    } else {
+        await restorePersistedAttachments();
     }
     startNewChat();
     resizeInput();
+    scheduleAttachmentWarmup();
 }
 
 init().catch(() => {
