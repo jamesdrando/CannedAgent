@@ -118,12 +118,20 @@ body::before {
 
 .admin-grid {
     grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+    align-items: start;
 }
 
 .panel {
     padding: 1rem 1.05rem;
     display: grid;
     gap: 0.9rem;
+}
+
+.usage-panel {
+    min-height: 0;
+    max-height: min(70vh, 42rem);
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
 }
 
 .panel-header {
@@ -201,6 +209,11 @@ body::before {
 
 .table-wrap {
     overflow: auto;
+}
+
+.usage-panel .table-wrap {
+    min-height: 0;
+    overscroll-behavior: contain;
 }
 
 table {
