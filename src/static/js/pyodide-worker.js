@@ -71,8 +71,36 @@ await micropip.install("openpyxl==3.1.5")
 }
 
 function selectedFilesForTool(tool, args = {}) {
+    const allFiles = [...sessionFiles.values()];
+    const resolveFile = (fileRef) => {
+        if (!fileRef) return null;
+        if (sessionFiles.has(fileRef)) {
+            return sessionFiles.get(fileRef);
+        }
+        const referenceMatches = allFiles.filter((file) => file.reference_name === fileRef);
+        if (referenceMatches.length === 1) {
+            return referenceMatches[0];
+        }
+        if (referenceMatches.length > 1) {
+            return null;
+        }
+        const nameMatches = allFiles.filter((file) => file.name === fileRef);
+        return nameMatches.length === 1 ? nameMatches[0] : null;
+    };
+    const resolveFileList = (fileRefs = []) => {
+        const selected = [];
+        const seenIds = new Set();
+        for (const fileRef of fileRefs) {
+            const file = resolveFile(fileRef);
+            if (!file || seenIds.has(file.id)) continue;
+            selected.push(file);
+            seenIds.add(file.id);
+        }
+        return selected;
+    };
+
     if (tool === "files.read_text" || tool === "tables.preview" || tool === "tables.profile") {
-        const file = sessionFiles.get(args.file_id);
+        const file = resolveFile(args.file_id);
         return file ? [file] : [];
     }
 
@@ -80,9 +108,7 @@ function selectedFilesForTool(tool, args = {}) {
         const requestedIds = Array.isArray(args.file_ids) && args.file_ids.length
             ? args.file_ids
             : [...sessionFiles.keys()];
-        return requestedIds
-            .map((fileId) => sessionFiles.get(fileId))
-            .filter(Boolean);
+        return resolveFileList(requestedIds);
     }
 
     return [];
@@ -219,12 +245,25 @@ def _select_files(payload, file_ids):
     files = payload["files"]
     if not file_ids:
         return files
-    wanted = set(file_ids)
-    return [item for item in files if item["id"] in wanted]
+    available_files = {item["id"]: item for item in files}
+    selected = []
+    seen_ids = set()
+    for file_ref in file_ids:
+        item = _resolve_file_reference(available_files, file_ref)
+        if item["id"] in seen_ids:
+            continue
+        selected.append(item)
+        seen_ids.add(item["id"])
+    return selected
 
 def _resolve_file_reference(available_files, file_ref):
     if file_ref in available_files:
         return available_files[file_ref]
+    reference_matches = [item for item in available_files.values() if item.get("reference_name") == file_ref]
+    if len(reference_matches) == 1:
+        return reference_matches[0]
+    if len(reference_matches) > 1:
+        raise ValueError(f"Ambiguous file reference: {file_ref}")
     matches = [item for item in available_files.values() if item["name"] == file_ref]
     if not matches:
         raise ValueError(f"Unknown file reference: {file_ref}")
@@ -302,6 +341,7 @@ def tool_files_describe(payload, args):
         description = {
             "id": file_meta["id"],
             "name": file_meta["name"],
+            "reference_name": file_meta.get("reference_name", file_meta["name"]),
             "kind": file_meta["kind"],
             "size_bytes": file_meta["size_bytes"],
             "path": file_meta["path"],
@@ -318,17 +358,14 @@ def tool_files_describe(payload, args):
             description["excerpt"] = excerpt
         items.append(description)
     summary = "; ".join(
-        f"{item['name']} ({item['kind']})"
+        f"{item.get('reference_name', item['name'])} ({item['kind']})"
         + (f" rows={item['rows']}" if "rows" in item else "")
         for item in items
     )
     return {"output": {"files": items}, "summary_for_model": summary}
 
 def tool_files_read_text(payload, args):
-    file_id = args["file_id"]
-    file_meta = next((item for item in payload["files"] if item["id"] == file_id), None)
-    if file_meta is None:
-        raise ValueError("Unknown file id.")
+    file_meta = _resolve_file_reference({item["id"]: item for item in payload["files"]}, args["file_id"])
     max_chars = int(args.get("max_chars") or 6000)
     text = _read_text(file_meta, min(max_chars, 24000))
     return {
@@ -336,18 +373,16 @@ def tool_files_read_text(payload, args):
             "file": {
                 "id": file_meta["id"],
                 "name": file_meta["name"],
+                "reference_name": file_meta.get("reference_name", file_meta["name"]),
                 "kind": file_meta["kind"],
             },
             "text": text,
         },
-        "summary_for_model": f"Extracted text from {file_meta['name']} ({len(text)} chars).",
+        "summary_for_model": f"Extracted text from {file_meta.get('reference_name', file_meta['name'])} ({len(text)} chars).",
     }
 
 def tool_tables_preview(payload, args):
-    file_id = args["file_id"]
-    file_meta = next((item for item in payload["files"] if item["id"] == file_id), None)
-    if file_meta is None:
-        raise ValueError("Unknown file id.")
+    file_meta = _resolve_file_reference({item["id"]: item for item in payload["files"]}, args["file_id"])
     dataframe = _load_dataframe(file_meta)
     rows = max(1, min(int(args.get("rows") or 8), 25))
     preview = dataframe.head(rows).replace({np.nan: None}).to_dict(orient="records")
@@ -356,20 +391,18 @@ def tool_tables_preview(payload, args):
             "file": {
                 "id": file_meta["id"],
                 "name": file_meta["name"],
+                "reference_name": file_meta.get("reference_name", file_meta["name"]),
                 "kind": file_meta["kind"],
             },
             "columns": [str(column) for column in dataframe.columns],
             "row_count": int(len(dataframe.index)),
             "preview": _json_safe(preview),
         },
-        "summary_for_model": f"{file_meta['name']} has {len(dataframe.index)} rows and {len(dataframe.columns)} columns.",
+        "summary_for_model": f"{file_meta.get('reference_name', file_meta['name'])} has {len(dataframe.index)} rows and {len(dataframe.columns)} columns.",
     }
 
 def tool_tables_profile(payload, args):
-    file_id = args["file_id"]
-    file_meta = next((item for item in payload["files"] if item["id"] == file_id), None)
-    if file_meta is None:
-        raise ValueError("Unknown file id.")
+    file_meta = _resolve_file_reference({item["id"]: item for item in payload["files"]}, args["file_id"])
     dataframe = _load_dataframe(file_meta)
     max_columns = max(1, min(int(args.get("max_columns") or 16), 32))
     profile = {}
@@ -396,13 +429,14 @@ def tool_tables_profile(payload, args):
             "file": {
                 "id": file_meta["id"],
                 "name": file_meta["name"],
+                "reference_name": file_meta.get("reference_name", file_meta["name"]),
                 "kind": file_meta["kind"],
             },
             "row_count": int(len(dataframe.index)),
             "column_count": int(len(dataframe.columns)),
             "profile": profile,
         },
-        "summary_for_model": f"Profiled {file_meta['name']} with {len(dataframe.columns)} columns.",
+        "summary_for_model": f"Profiled {file_meta.get('reference_name', file_meta['name'])} with {len(dataframe.columns)} columns.",
     }
 
 def _validate_python(code):
@@ -427,7 +461,9 @@ def tool_python_execute(payload, args):
     selected = _select_files(payload, args.get("file_ids"))
     available_files = {
         item["id"]: {
+            "id": item["id"],
             "name": item["name"],
+            "reference_name": item.get("reference_name", item["name"]),
             "kind": item["kind"],
             "path": item["path"],
             "size_bytes": item["size_bytes"],
@@ -508,13 +544,14 @@ function listFilesOutput() {
     const files = [...sessionFiles.values()].map((file) => ({
         id: file.id,
         name: file.name,
+        reference_name: file.reference_name || file.name,
         kind: file.kind,
         size_bytes: file.size_bytes,
         mime_type: file.mime_type,
         path: file.path,
     }));
     const summaryForModel = files.length
-        ? files.map((file) => `${file.name} (${file.kind}) at ${file.path}`).join("; ")
+        ? files.map((file) => `${file.reference_name} (${file.kind}) at ${file.path}`).join("; ")
         : "No browser-local files are currently loaded.";
     return {
         output: { files },
@@ -549,6 +586,7 @@ async function invokePythonTool(tool, args) {
         files: [...sessionFiles.values()].map((file) => ({
             id: file.id,
             name: file.name,
+            reference_name: file.reference_name || file.name,
             kind: file.kind,
             size_bytes: file.size_bytes,
             mime_type: file.mime_type,

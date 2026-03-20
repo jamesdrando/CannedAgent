@@ -36,10 +36,14 @@ const elements = {
     input: document.getElementById("input-box"),
     sendButton: document.getElementById("send-button"),
     attachmentInput: document.getElementById("attachment-input"),
+    attachmentManagerButton: document.getElementById("attachment-manager-button"),
     attachmentSecurity: document.getElementById("attachment-security"),
     attachmentTray: document.getElementById("attachment-tray"),
     attachmentStatus: document.getElementById("attachment-status"),
     attachmentPrivacy: document.getElementById("attachment-privacy"),
+    attachmentModal: document.getElementById("attachment-modal"),
+    attachmentModalBackdrop: document.getElementById("attachment-modal-backdrop"),
+    attachmentModalClose: document.getElementById("attachment-modal-close"),
     settingsForm: document.getElementById("settings-form"),
     settingsCloseButton: document.getElementById("settings-close-button"),
     settingsTargetTitle: document.getElementById("settings-target-title"),
@@ -77,6 +81,7 @@ const state = {
     activeRunId: null,
     attachments: [],
     attachmentSessionNeedsSync: false,
+    attachmentManagerOpen: false,
     toolStatuses: [],
     attachmentSupport: {
         supported: typeof Worker !== "undefined" && typeof WebAssembly !== "undefined",
@@ -156,6 +161,64 @@ function attachmentCountLabel(count) {
 
 function totalAttachmentBytes() {
     return state.attachments.reduce((total, attachment) => total + (attachment.size_bytes || 0), 0);
+}
+
+function splitAttachmentReferenceName(name) {
+    const rawName = String(name || "file").trim() || "file";
+    const lastDot = rawName.lastIndexOf(".");
+    if (lastDot <= 0) {
+        return { stem: rawName, extension: "" };
+    }
+    return {
+        stem: rawName.slice(0, lastDot),
+        extension: rawName.slice(lastDot),
+    };
+}
+
+function createUniqueAttachmentReferenceName(name, existingAttachments = [], excludeId = null) {
+    const preferredName = String(name || "file").trim() || "file";
+    const usedNames = new Set(
+        existingAttachments
+            .filter((attachment) => attachment.id !== excludeId)
+            .map((attachment) => String(attachment.reference_name || attachment.name || "").toLowerCase())
+            .filter(Boolean),
+    );
+    if (!usedNames.has(preferredName.toLowerCase())) {
+        return preferredName;
+    }
+
+    const { stem, extension } = splitAttachmentReferenceName(preferredName);
+    let suffix = 2;
+    let candidate = `${stem} (${suffix})${extension}`;
+    while (usedNames.has(candidate.toLowerCase())) {
+        suffix += 1;
+        candidate = `${stem} (${suffix})${extension}`;
+    }
+    return candidate;
+}
+
+function normalizeAttachmentRecord(record, existingAttachments = []) {
+    const normalized = {
+        ...record,
+        name: String(record.name || record.reference_name || "file"),
+    };
+    normalized.reference_name = createUniqueAttachmentReferenceName(
+        normalized.reference_name || normalized.name,
+        existingAttachments,
+        normalized.id,
+    );
+    return normalized;
+}
+
+function attachmentDisplayName(attachment) {
+    return attachment.reference_name || attachment.name;
+}
+
+function attachmentBadgeCount() {
+    return state.attachments.length
+        || state.attachmentSecurity.lockedRecordCount
+        || state.attachmentSecurity.legacyRecordCount
+        || 0;
 }
 
 function defaultAttachmentStatusMessage() {
@@ -364,6 +427,7 @@ class AttachmentVault {
     async saveEncrypted(record, key) {
         const metadata = {
             name: record.name,
+            reference_name: record.reference_name || record.name,
             mime_type: record.mime_type,
             size_bytes: record.size_bytes,
             kind: record.kind,
@@ -442,6 +506,7 @@ async function decryptStoredAttachment(item, key) {
     return {
         id: item.id,
         name: metadata.name,
+        reference_name: metadata.reference_name || metadata.name,
         mime_type: metadata.mime_type || "application/octet-stream",
         size_bytes: metadata.size_bytes || file.size,
         kind: metadata.kind,
@@ -582,6 +647,19 @@ function closeSettingsDrawer() {
     elements.appLayout.classList.remove("settings-open");
 }
 
+function openAttachmentManager() {
+    state.attachmentManagerOpen = true;
+    document.body.classList.add("attachment-manager-open");
+    requestRender();
+}
+
+function closeAttachmentManager() {
+    if (!state.attachmentManagerOpen) return;
+    state.attachmentManagerOpen = false;
+    document.body.classList.remove("attachment-manager-open");
+    requestRender();
+}
+
 function cloneSettings(settings) {
     return {
         provider: settings?.provider || "",
@@ -673,6 +751,7 @@ function startNewChat() {
     state.messages = [];
     state.modelSelectionMode = "preset";
     clearToolStatuses();
+    closeAttachmentManager();
     elements.input.value = state.draftInput;
     closeSidebar();
     requestRender();
@@ -681,8 +760,9 @@ function startNewChat() {
 }
 
 function resizeInput() {
+    const maxHeight = window.matchMedia("(max-width: 640px)").matches ? 132 : 180;
     elements.input.style.height = "0px";
-    elements.input.style.height = `${Math.min(elements.input.scrollHeight, 180)}px`;
+    elements.input.style.height = `${Math.min(elements.input.scrollHeight, maxHeight)}px`;
 }
 
 function activeProviderSupportsBrowserTools() {
@@ -740,6 +820,7 @@ function attachmentPayload(attachment) {
     return {
         id: attachment.id,
         name: attachment.name,
+        reference_name: attachment.reference_name,
         mime_type: attachment.mime_type,
         size_bytes: attachment.size_bytes,
         kind: attachment.kind,
@@ -752,6 +833,7 @@ function attachmentRecordFromFile(file) {
     return {
         id: createRequestId("file"),
         name: file.name,
+        reference_name: createUniqueAttachmentReferenceName(file.name, state.attachments),
         mime_type: file.type || "application/octet-stream",
         size_bytes: file.size,
         kind,
@@ -801,16 +883,16 @@ async function refreshStoredAttachmentState() {
 }
 
 function mergeUnlockedAttachments(unlockedAttachments) {
-    const merged = new Map();
+    const merged = [];
     for (const attachment of state.attachments) {
         if (attachment.persistence !== "browser") {
-            merged.set(attachment.id, attachment);
+            merged.push(normalizeAttachmentRecord(attachment, merged));
         }
     }
     for (const attachment of unlockedAttachments) {
-        merged.set(attachment.id, attachment);
+        merged.push(normalizeAttachmentRecord(attachment, merged));
     }
-    state.attachments = [...merged.values()];
+    state.attachments = merged;
 }
 
 async function rememberLoadedAttachments() {
@@ -1206,7 +1288,7 @@ function formatChatGroupLabel(value) {
 }
 
 function escapeHtml(value) {
-    return value
+    return String(value ?? "")
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;")
@@ -1437,7 +1519,15 @@ function renderAttachmentSecurity(providerSupportsTools) {
 function renderAttachments() {
     const providerSupportsTools = activeProviderSupportsBrowserTools();
     elements.attachmentInput.disabled = state.streaming || !providerSupportsTools;
-    elements.attachmentPrivacy.hidden = !state.attachmentSupport.supported;
+    elements.attachmentManagerButton.disabled = false;
+    elements.attachmentManagerButton.setAttribute("aria-expanded", String(state.attachmentManagerOpen));
+    const badgeCount = attachmentBadgeCount();
+    elements.attachmentManagerButton.innerHTML = badgeCount
+        ? `Workspace files <span class="attachment-manager-count">${escapeHtml(String(badgeCount))}</span>`
+        : "Workspace files";
+    elements.attachmentModal.hidden = !state.attachmentManagerOpen;
+    document.body.classList.toggle("attachment-manager-open", state.attachmentManagerOpen);
+    elements.attachmentPrivacy.hidden = false;
     elements.attachmentPrivacy.textContent = defaultAttachmentPrivacyMessage();
     renderAttachmentSecurity(providerSupportsTools);
 
@@ -1454,8 +1544,18 @@ function renderAttachments() {
         : `<span>${escapeHtml(attachmentStatusMessage)}</span>`;
 
     if (!state.attachments.length) {
-        elements.attachmentTray.hidden = true;
-        elements.attachmentTray.innerHTML = "";
+        elements.attachmentTray.hidden = false;
+        elements.attachmentTray.innerHTML = `
+            <section class="attachment-manager attachment-manager-empty">
+                <div class="attachment-manager-header">
+                    <div>
+                        <p class="attachment-manager-kicker">Workspace files</p>
+                        <strong>No files loaded yet</strong>
+                    </div>
+                </div>
+                <p class="attachment-manager-summary">Add CSV, XLS, XLSX, PDF, DOCX, JSON, or text files to keep them available to you and the model for this session.</p>
+            </section>
+        `;
         return;
     }
 
@@ -1482,12 +1582,15 @@ function renderAttachments() {
                 ${state.attachments.map((attachment) => `
                     <div class="attachment-item">
                         <div class="attachment-item-copy">
-                            <strong>${escapeHtml(attachment.name)}</strong>
+                            <strong>${escapeHtml(attachmentDisplayName(attachment))}</strong>
                             <span>${escapeHtml(
                                 `${attachment.kind.toUpperCase()} · ${formatFileSize(attachment.size_bytes)} · ${
                                     attachment.persistence === "browser" ? "Remembered on device" : "Session only"
                                 }`
                             )}</span>
+                            ${attachment.reference_name && attachment.reference_name !== attachment.name
+        ? `<span class="attachment-reference-note">${escapeHtml(`Uploaded as ${attachment.name}`)}</span>`
+        : ""}
                         </div>
                         <button
                             type="button"
@@ -1721,6 +1824,7 @@ async function loadChat(chatId) {
         state.modelSelectionMode = "preset";
         clearToolStatuses();
         state.settingsDirty = false;
+        closeAttachmentManager();
         elements.input.value = state.draftInput;
         closeSidebar();
         requestRender();
@@ -1735,6 +1839,7 @@ async function loadChat(chatId) {
     clearToolStatuses();
     state.settingsDirty = false;
     state.settingsFeedback = "";
+    closeAttachmentManager();
     elements.input.value = "";
     closeSidebar();
     requestRender();
@@ -1830,6 +1935,7 @@ function currentAttachmentManifest() {
     return state.attachments.map((attachment) => ({
         id: attachment.id,
         name: attachment.name,
+        reference_name: attachment.reference_name,
         mime_type: attachment.mime_type,
         size_bytes: attachment.size_bytes,
         kind: attachment.kind,
@@ -2112,6 +2218,7 @@ async function renameCurrentChat() {
 }
 
 async function logout() {
+    closeAttachmentManager();
     await resetAttachments({ clearStorage: false });
     if (pyodideBridge) {
         pyodideBridge.destroy();
@@ -2283,6 +2390,22 @@ elements.attachmentInput.addEventListener("change", async (event) => {
     }
 });
 
+elements.attachmentManagerButton.addEventListener("click", () => {
+    if (state.attachmentManagerOpen) {
+        closeAttachmentManager();
+        return;
+    }
+    openAttachmentManager();
+});
+
+elements.attachmentModalBackdrop.addEventListener("click", () => {
+    closeAttachmentManager();
+});
+
+elements.attachmentModalClose.addEventListener("click", () => {
+    closeAttachmentManager();
+});
+
 elements.attachmentSecurity.addEventListener("change", async (event) => {
     const toggle = event.target.closest("[data-attachment-action='toggle-persist']");
     if (!toggle) return;
@@ -2391,6 +2514,7 @@ elements.settingsBackdrop.addEventListener("click", () => {
 
 window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+        closeAttachmentManager();
         closeSidebar();
         closeSettingsDrawer();
     }

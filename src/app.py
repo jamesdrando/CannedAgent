@@ -213,6 +213,7 @@ def browser_tool_usage_guidance() -> str:
         "If you need file inspection or analysis, use the provider's native tool/function calling mechanism.\n"
         "In python.execute, pd, np, math, statistics, files, list_files(), file_info(), "
         "read_table(file_id_or_name), and read_text(file_id_or_name) are already available, so imports are optional.\n"
+        "When files.list returns a reference_name, prefer that friendly reference over long opaque ids.\n"
         "Prefer the minimum number of tool calls needed. If a tool result already answers the user's question, "
         "respond directly instead of calling more tools.\n"
         "Do not print tool invocations as plain text, JSON blobs, XML, or wrappers such as TOOLCALL>...ALL>.\n"
@@ -576,6 +577,7 @@ class MessageCreatePayload(BaseModel):
 class AttachmentManifestItem(BaseModel):
     id: str
     name: str
+    reference_name: str | None = None
     mime_type: str
     size_bytes: int
     kind: str
@@ -1074,7 +1076,11 @@ async def create_run(
     tools = browser_tool_definitions() if payload.attachment_manifest else []
     if payload.attachment_manifest and history:
         manifest_lines = "\n".join(
-            f"- {item.name} ({item.kind}, {item.size_bytes} bytes)"
+            (
+                f"- {(item.reference_name or item.name)}"
+                + (f" (uploaded as {item.name})" if item.reference_name and item.reference_name != item.name else "")
+                + f" ({item.kind}, {item.size_bytes} bytes)"
+            )
             for item in payload.attachment_manifest
         )
         history[-1].content = (

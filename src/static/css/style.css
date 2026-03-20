@@ -70,6 +70,10 @@ body {
     overflow: hidden;
 }
 
+body.attachment-manager-open {
+    overflow: hidden;
+}
+
 body::before {
     content: "";
     position: fixed;
@@ -401,6 +405,7 @@ pre, code {
 }
 
 .conversation-panel {
+    position: relative;
     min-width: 0;
     min-height: 0;
     display: grid;
@@ -817,17 +822,44 @@ pre, code {
 .composer-main {
     display: grid;
     gap: 0.55rem;
+    min-width: 0;
 }
 
 .attachment-toolbar {
-    display: flex;
-    align-items: center;
+    display: grid;
+    align-items: start;
     gap: 0.7rem;
-    justify-content: space-between;
+}
+
+.attachment-toolbar-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.55rem;
 }
 
 .attachment-button {
     justify-self: start;
+}
+
+.attachment-manager-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.attachment-manager-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.45rem;
+    height: 1.45rem;
+    padding: 0 0.42rem;
+    border-radius: 999px;
+    background: rgba(217, 255, 91, 0.12);
+    color: var(--accent-strong);
+    font-size: 0.76rem;
+    line-height: 1;
 }
 
 .attachment-status,
@@ -838,9 +870,72 @@ pre, code {
     line-height: 1.45;
 }
 
+.attachment-status {
+    min-height: 1.2rem;
+}
+
 .attachment-tray {
     display: grid;
     gap: 0.6rem;
+}
+
+.attachment-modal {
+    position: absolute;
+    inset: 0;
+    z-index: 28;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+}
+
+.attachment-modal[hidden] {
+    display: none;
+}
+
+.attachment-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    border: 0;
+    background: rgba(7, 10, 12, 0.62);
+}
+
+.attachment-modal-panel {
+    position: relative;
+    z-index: 1;
+    width: min(560px, 100%);
+    max-height: min(84dvh, 760px);
+    overflow: auto;
+    display: grid;
+    gap: 0.9rem;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    background: rgba(18, 22, 26, 0.98);
+    box-shadow: 0 28px 60px rgba(0, 0, 0, 0.34);
+    backdrop-filter: blur(18px);
+}
+
+.attachment-modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.attachment-modal-title {
+    display: grid;
+    gap: 0.15rem;
+}
+
+.attachment-modal-title h3 {
+    margin: 0;
+}
+
+.attachment-modal-subtitle {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.45;
 }
 
 .attachment-security {
@@ -895,6 +990,10 @@ pre, code {
     border: 1px solid var(--border);
     border-radius: 16px;
     background: rgba(255, 255, 255, 0.035);
+}
+
+.attachment-manager-empty {
+    background: rgba(255, 255, 255, 0.02);
 }
 
 .attachment-manager-header {
@@ -953,6 +1052,10 @@ pre, code {
 .attachment-item-copy span {
     color: var(--muted);
     font-size: 0.76rem;
+}
+
+.attachment-item-copy .attachment-reference-note {
+    color: rgba(238, 241, 235, 0.72);
 }
 
 .attachment-remove {
@@ -1215,14 +1318,16 @@ pre, code {
     }
 
     .composer {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr) auto;
         padding: 0.72rem 0.78rem calc(0.72rem + env(safe-area-inset-bottom));
         gap: 0.65rem;
     }
 
     .attachment-toolbar {
-        align-items: flex-start;
-        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .attachment-toolbar-actions {
         gap: 0.45rem;
     }
 
@@ -1252,14 +1357,29 @@ pre, code {
 
     #input-box {
         min-height: 52px;
+        max-height: 132px;
         font-size: 16px;
         padding: 0.78rem 0.82rem;
     }
 
     #send-button {
-        width: 100%;
         min-width: 78px;
         height: 52px;
         padding: 0 0.85rem;
+    }
+
+    .attachment-modal {
+        padding: 0;
+        align-items: end;
+    }
+
+    .attachment-modal-panel {
+        width: 100%;
+        max-height: min(88dvh, 760px);
+        padding: 0.9rem 0.85rem calc(0.9rem + env(safe-area-inset-bottom));
+        border-left: none;
+        border-right: none;
+        border-bottom: none;
+        border-radius: 22px 22px 0 0;
     }
 }

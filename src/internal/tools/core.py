@@ -8,7 +8,7 @@ BROWSER_TOOL_DEFINITIONS: list[ToolDefinition] = [
         name="files.list",
         description=(
             "List browser-local files available for this page session. "
-            "Use this first to inspect available file ids, names, kinds, sizes, and sandbox paths."
+            "Use this first to inspect available file ids, reference names, original names, kinds, sizes, and sandbox paths."
         ),
         parameters={
             "type": "object",
@@ -20,7 +20,7 @@ BROWSER_TOOL_DEFINITIONS: list[ToolDefinition] = [
         name="files.describe",
         description=(
             "Return metadata and a short content-oriented description for one or more browser-local files "
-            "without exposing full raw contents."
+            "without exposing full raw contents. File references can be ids or reference names from files.list."
         ),
         parameters={
             "type": "object",
@@ -39,7 +39,8 @@ BROWSER_TOOL_DEFINITIONS: list[ToolDefinition] = [
         name="files.read_text",
         description=(
             "Extract bounded text from a text-like, PDF, or DOCX file. "
-            "Use this when you need selected excerpts instead of a structured table preview."
+            "Use this when you need selected excerpts instead of a structured table preview. "
+            "The file_id field accepts either a file id or a reference name from files.list."
         ),
         parameters={
             "type": "object",
@@ -55,7 +56,8 @@ BROWSER_TOOL_DEFINITIONS: list[ToolDefinition] = [
         name="tables.preview",
         description=(
             "Preview a structured file such as CSV, TSV, JSON table data, XLS, or XLSX. "
-            "Returns headers, row count hints, and a bounded sample."
+            "Returns headers, row count hints, and a bounded sample. "
+            "The file_id field accepts either a file id or a reference name from files.list."
         ),
         parameters={
             "type": "object",
@@ -71,7 +73,8 @@ BROWSER_TOOL_DEFINITIONS: list[ToolDefinition] = [
         name="tables.profile",
         description=(
             "Profile a structured dataset and return bounded summary statistics, null counts, "
-            "and column dtypes without exposing full raw rows."
+            "and column dtypes without exposing full raw rows. "
+            "The file_id field accepts either a file id or a reference name from files.list."
         ),
         parameters={
             "type": "object",
@@ -90,6 +93,7 @@ BROWSER_TOOL_DEFINITIONS: list[ToolDefinition] = [
             "Available files live under /session and can be discovered via files.list. "
             "`pd`, `np`, `math`, `statistics`, `files`, `list_files()`, `file_info()`, "
             "`read_table(file_id_or_name)`, and `read_text(file_id_or_name)` are preloaded, so imports are optional. "
+            "File ids and reference names from files.list both work. "
             "Use raw Python only when the other file/table tools are insufficient and do not attempt network, "
             "process, or package-management access."
         ),
