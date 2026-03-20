@@ -4,6 +4,7 @@ const CORE_PACKAGES = ["numpy", "pandas"];
 const OPTIONAL_PACKAGE_LABELS = {
     docx: "lxml",
     pdf: "PyMuPDF",
+    xls: "xlrd",
     xlsx: "openpyxl",
 };
 
@@ -45,6 +46,12 @@ async function ensureOptionalPackage(kind) {
             await pyodide.loadPackage(["lxml"]);
         } else if (kind === "pdf") {
             await pyodide.loadPackage(["PyMuPDF"]);
+        } else if (kind === "xls") {
+            await pyodide.loadPackage(["micropip"]);
+            await pyodide.runPythonAsync(`
+import micropip
+await micropip.install("xlrd==2.0.1")
+            `);
         } else if (kind === "xlsx") {
             await pyodide.loadPackage(["micropip"]);
             await pyodide.runPythonAsync(`
@@ -110,7 +117,7 @@ import numpy as np
 import pandas as pd
 
 TEXT_KINDS = {"txt", "md", "json", "csv", "tsv"}
-TABLE_KINDS = {"csv", "tsv", "json", "xlsx"}
+TABLE_KINDS = {"csv", "tsv", "json", "xls", "xlsx"}
 ALLOWED_IMPORTS = {
     "collections",
     "csv",
@@ -127,6 +134,7 @@ ALLOWED_IMPORTS = {
     "re",
     "statistics",
     "textwrap",
+    "xlrd",
 }
 BLOCKED_IMPORT_PREFIXES = {
     "asyncio",
@@ -242,6 +250,8 @@ def _load_dataframe(file_meta):
         return pd.read_csv(path)
     if kind == "tsv":
         return pd.read_csv(path, sep="\\t")
+    if kind == "xls":
+        return pd.read_excel(path, engine="xlrd")
     if kind == "xlsx":
         return pd.read_excel(path, engine="openpyxl")
     if kind == "json":

@@ -105,6 +105,7 @@ const SUPPORTED_ATTACHMENT_TYPES = new Set([
     "json",
     "txt",
     "md",
+    "xls",
     "xlsx",
     "pdf",
     "docx",

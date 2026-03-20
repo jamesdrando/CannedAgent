@@ -54,7 +54,7 @@ BROWSER_TOOL_DEFINITIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tables.preview",
         description=(
-            "Preview a structured file such as CSV, TSV, JSON table data, or XLSX. "
+            "Preview a structured file such as CSV, TSV, JSON table data, XLS, or XLSX. "
             "Returns headers, row count hints, and a bounded sample."
         ),
         parameters={
