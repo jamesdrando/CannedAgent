@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import asyncio
+import ast
+import json
 import os
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from src.auth import (
@@ -30,9 +35,13 @@ from src.db import engine, get_db_session, init_db
 from src.internal.providers import (
     ConversationMessage,
     ProviderRegistry,
+    ProviderMessage,
     RunSettings,
     RunSettingsPatch,
+    ToolCall,
+    ToolResult,
 )
+from src.internal.tools import browser_tool_definitions
 from src.models import Chat, ChatSettings, Message, User, UserPreference, utcnow
 
 
@@ -51,6 +60,18 @@ APP_PAGE = PAGES_DIR / "index.html"
 provider_registry = ProviderRegistry()
 db_session_dep = Annotated[Session, Depends(get_db_session)]
 login_attempts: dict[str, deque[float]] = defaultdict(deque)
+active_runs: dict[str, "ActiveRun"] = {}
+MAX_TOOL_ITERATIONS = 6
+
+
+@dataclass
+class ActiveRun:
+    id: str
+    user_id: str
+    chat_id: str
+    pending_tool_call_ids: set[str] = field(default_factory=set)
+    tool_result_queue: asyncio.Queue[list[ToolResult]] = field(default_factory=asyncio.Queue)
+    created_at: float = field(default_factory=time.time)
 
 
 def should_seed_default_admin() -> bool:
@@ -133,6 +154,111 @@ def sanitize_generated_title(value: str) -> str:
     if not normalized:
         return "New chat"
     return normalized[:120]
+
+
+def provider_history_from_messages(messages: list[Message]) -> list[ProviderMessage]:
+    return [ProviderMessage(role=message.role, content=message.content) for message in messages]
+
+
+def json_line(payload: dict[str, Any]) -> bytes:
+    return f"{json.dumps(payload, separators=(',', ':'))}\n".encode("utf-8")
+
+
+def run_event(run_id: str, event_type: str, **payload: Any) -> bytes:
+    return json_line({"type": event_type, "run_id": run_id, **payload})
+
+
+def iter_text_chunks(text: str, *, target_size: int = 96) -> list[str]:
+    if not text:
+        return []
+    words = text.split(" ")
+    chunks: list[str] = []
+    current = ""
+    for word in words:
+        if not current:
+            current = word
+            continue
+        candidate = f"{current} {word}"
+        if len(candidate) <= target_size:
+            current = candidate
+            continue
+        chunks.append(f"{current} ")
+        current = word
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def tool_content_for_model(result: ToolResult) -> str:
+    payload = {
+        "tool_name": result.name,
+        "summary_for_model": result.summary_for_model,
+        "output": result.output,
+    }
+    return json.dumps(payload, ensure_ascii=True)
+
+
+def browser_tool_usage_guidance() -> str:
+    return (
+        "Browser-local files are available for this run only. "
+        "They are not stored on the Jobbr website and should be accessed via the available tools.\n"
+        "If you need file inspection or analysis, use the provider's native tool/function calling mechanism.\n"
+        "Do not print tool invocations as plain text, JSON blobs, XML, or wrappers such as TOOLCALL>...ALL>.\n"
+        "Either answer normally, or request one of the available tools directly."
+    )
+
+
+def parse_inline_tool_calls(text: str) -> list[dict[str, Any]]:
+    marker = "TOOLCALL>"
+    if marker not in text:
+        return []
+
+    payload = text.split(marker, 1)[1]
+    for terminator in ("ALL>", "<ALL>", "</TOOLCALL>", "ENDTOOLCALL>"):
+        if terminator in payload:
+            payload = payload.split(terminator, 1)[0]
+            break
+
+    normalized = (
+        payload.strip()
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("’", "'")
+        .replace("‘", "'")
+    )
+    if not normalized:
+        return []
+
+    parsed: Any
+    try:
+        parsed = json.loads(normalized)
+    except json.JSONDecodeError:
+        try:
+            parsed = ast.literal_eval(normalized)
+        except (SyntaxError, ValueError):
+            return []
+
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+
+    tool_calls: list[dict[str, Any]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        arguments = item.get("arguments")
+        if not name or not isinstance(arguments, dict):
+            continue
+        tool_calls.append(
+            {
+                "id": str(item.get("id") or uuid4().hex),
+                "name": name,
+                "arguments": arguments,
+            }
+        )
+    return tool_calls
 
 
 async def generate_chat_title(
@@ -299,6 +425,45 @@ def resolve_chat_settings(session: Session, user: User, chat: Chat) -> RunSettin
     return settings_from_record(get_or_create_chat_settings(session, user, chat))
 
 
+async def persist_assistant_reply(
+    *,
+    user: User,
+    chat: Chat,
+    current_message: str,
+    assistant_text: str,
+    settings: RunSettings,
+) -> None:
+    if not assistant_text:
+        return
+
+    with Session(engine) as write_session:
+        persisted_chat = get_chat_for_user(write_session, user, chat.id)
+        assistant_message = Message(
+            chat_id=persisted_chat.id,
+            role="assistant",
+            content=assistant_text,
+            sequence=next_message_sequence(write_session, persisted_chat.id),
+        )
+        persisted_chat.updated_at = utcnow()
+        write_session.add(assistant_message)
+        write_session.add(persisted_chat)
+        write_session.commit()
+
+        message_count = len(list_messages_for_chat(write_session, persisted_chat.id))
+        if persisted_chat.title == "New chat" and message_count == 2:
+            try:
+                persisted_chat.title = await generate_chat_title(
+                    settings=settings,
+                    user_message=current_message,
+                    assistant_message=assistant_text,
+                )
+            except Exception:
+                persisted_chat.title = chat_title_from_content(current_message)
+            persisted_chat.updated_at = utcnow()
+            write_session.add(persisted_chat)
+            write_session.commit()
+
+
 def optional_page_user(request: Request, session: Session) -> User | None:
     return get_user_for_session_token(session, request.cookies.get(SESSION_COOKIE_NAME))
 
@@ -323,6 +488,24 @@ class ChatRenamePayload(BaseModel):
 
 class MessageCreatePayload(BaseModel):
     content: str
+
+
+class AttachmentManifestItem(BaseModel):
+    id: str
+    name: str
+    mime_type: str
+    size_bytes: int
+    kind: str
+
+
+class RunStartPayload(BaseModel):
+    input: str
+    attachment_manifest: list[AttachmentManifestItem] = Field(default_factory=list)
+    config_override: RunSettingsPatch | None = None
+
+
+class ToolResultPayload(BaseModel):
+    results: list[ToolResult]
 
 
 app = FastAPI()
@@ -580,6 +763,199 @@ def delete_chat(chat_id: str, request: Request, session: db_session_dep):
     return {"ok": True}
 
 
+@app.post("/api/chats/{chat_id}/runs")
+async def create_run(
+    chat_id: str,
+    payload: RunStartPayload,
+    request: Request,
+    session: db_session_dep,
+):
+    user = current_user(request, session)
+    chat = get_chat_for_user(session, user, chat_id)
+    content = payload.input.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Message content cannot be empty.")
+
+    chat_settings = resolve_chat_settings(session, user, chat)
+    settings = provider_registry.merge_settings(chat_settings, payload.config_override)
+    adapter = provider_registry.adapter_for(settings.provider)
+    if adapter is None:
+        raise HTTPException(status_code=400, detail="The selected provider is not supported.")
+
+    capability = provider_registry.capability_for(settings.provider)
+    if capability and not capability.configured:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{capability.label} is not configured on this server.",
+        )
+    if payload.attachment_manifest and capability and not capability.supports_browser_tools:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{capability.label} does not support browser-local file tools yet. "
+                "Switch to a tool-capable provider such as OpenRouter."
+            ),
+        )
+
+    user_message = Message(
+        chat_id=chat.id,
+        role="user",
+        content=content,
+        sequence=next_message_sequence(session, chat.id),
+    )
+    chat.updated_at = utcnow()
+    session.add(user_message)
+    session.add(chat)
+    session.commit()
+
+    run_id = uuid4().hex
+    active_run = ActiveRun(id=run_id, user_id=user.id, chat_id=chat.id)
+    active_runs[run_id] = active_run
+
+    history = provider_history_from_messages(list_messages_for_chat(session, chat.id))
+    tools = browser_tool_definitions() if payload.attachment_manifest else []
+    if payload.attachment_manifest and history:
+        manifest_lines = "\n".join(
+            f"- {item.name} ({item.kind}, {item.size_bytes} bytes)"
+            for item in payload.attachment_manifest
+        )
+        history[-1].content = (
+            f"{history[-1].content}\n\n"
+            f"{browser_tool_usage_guidance()}\n"
+            f"{manifest_lines}"
+        )
+
+    async def gen():
+        assistant_text = ""
+        try:
+            yield run_event(
+                run_id,
+                "run.started",
+                chat_id=chat.id,
+                attachment_manifest=[item.model_dump() for item in payload.attachment_manifest],
+            )
+
+            for _ in range(MAX_TOOL_ITERATIONS):
+                turn = await adapter.complete_turn(
+                    history=history,
+                    settings=settings,
+                    tools=tools or None,
+                )
+                if not turn.tool_calls and tools:
+                    inline_tool_calls = parse_inline_tool_calls(turn.text)
+                    if inline_tool_calls:
+                        turn.tool_calls = [
+                            ToolCall(
+                                id=item["id"],
+                                name=item["name"],
+                                arguments=item["arguments"],
+                            )
+                            for item in inline_tool_calls
+                        ]
+                        turn.text = ""
+                if turn.tool_calls:
+                    pending_ids = {tool_call.id for tool_call in turn.tool_calls}
+                    if not pending_ids:
+                        raise RuntimeError("The model requested a tool call without an id.")
+
+                    history.append(
+                        ProviderMessage(
+                            role="assistant",
+                            content=turn.text,
+                            tool_calls=turn.tool_calls,
+                        )
+                    )
+                    active_run.pending_tool_call_ids = pending_ids
+
+                    for tool_call in turn.tool_calls:
+                        yield run_event(
+                            run_id,
+                            "tool.call.requested",
+                            tool_call_id=tool_call.id,
+                            name=tool_call.name,
+                            arguments=tool_call.arguments,
+                        )
+                    yield run_event(
+                        run_id,
+                        "run.awaiting_tool_results",
+                        pending_tool_call_ids=sorted(active_run.pending_tool_call_ids),
+                    )
+
+                    while active_run.pending_tool_call_ids:
+                        results = await active_run.tool_result_queue.get()
+                        for result in results:
+                            if result.tool_call_id not in active_run.pending_tool_call_ids:
+                                continue
+                            active_run.pending_tool_call_ids.remove(result.tool_call_id)
+                            history.append(
+                                ProviderMessage(
+                                    role="tool",
+                                    content=tool_content_for_model(result),
+                                    tool_call_id=result.tool_call_id,
+                                    tool_name=result.name,
+                                )
+                            )
+                            yield run_event(
+                                run_id,
+                                "tool.call.completed",
+                                tool_call_id=result.tool_call_id,
+                                name=result.name,
+                            )
+                    continue
+
+                assistant_text = turn.text.strip()
+                if not assistant_text:
+                    raise RuntimeError("The model returned an empty response.")
+
+                for chunk in iter_text_chunks(assistant_text):
+                    yield run_event(run_id, "message.delta", delta=chunk)
+                yield run_event(run_id, "message.completed", content=assistant_text)
+                await persist_assistant_reply(
+                    user=user,
+                    chat=chat,
+                    current_message=content,
+                    assistant_text=assistant_text,
+                    settings=settings,
+                )
+                yield run_event(run_id, "run.completed")
+                return
+
+            raise RuntimeError("The run reached the maximum number of tool iterations.")
+        except Exception as exc:
+            yield run_event(run_id, "run.failed", error=str(exc))
+        finally:
+            active_runs.pop(run_id, None)
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@app.post("/api/runs/{run_id}/tool-results")
+async def submit_tool_results(
+    run_id: str,
+    payload: ToolResultPayload,
+    request: Request,
+    session: db_session_dep,
+):
+    user = current_user(request, session)
+    active_run = active_runs.get(run_id)
+    if active_run is None or active_run.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+    accepted = [
+        result
+        for result in payload.results
+        if result.tool_call_id in active_run.pending_tool_call_ids
+    ]
+    if not accepted:
+        raise HTTPException(status_code=400, detail="No matching pending tool calls were found.")
+
+    await active_run.tool_result_queue.put(accepted)
+    return {
+        "accepted": len(accepted),
+        "pending": len(active_run.pending_tool_call_ids),
+    }
+
+
 @app.post("/api/chats/{chat_id}/messages")
 async def create_message(
     chat_id: str,
@@ -637,31 +1013,12 @@ async def create_message(
         if not assistant_text:
             return
 
-        with Session(engine) as write_session:
-            persisted_chat = get_chat_for_user(write_session, user, chat.id)
-            assistant_message = Message(
-                chat_id=persisted_chat.id,
-                role="assistant",
-                content=assistant_text,
-                sequence=next_message_sequence(write_session, persisted_chat.id),
-            )
-            persisted_chat.updated_at = utcnow()
-            write_session.add(assistant_message)
-            write_session.add(persisted_chat)
-            write_session.commit()
-
-            message_count = len(list_messages_for_chat(write_session, persisted_chat.id))
-            if persisted_chat.title == "New chat" and message_count == 2:
-                try:
-                    persisted_chat.title = await generate_chat_title(
-                        settings=settings,
-                        user_message=current_message,
-                        assistant_message=assistant_text,
-                    )
-                except Exception:
-                    persisted_chat.title = chat_title_from_content(current_message)
-                persisted_chat.updated_at = utcnow()
-                write_session.add(persisted_chat)
-                write_session.commit()
+        await persist_assistant_reply(
+            user=user,
+            chat=chat,
+            current_message=current_message,
+            assistant_text=assistant_text,
+            settings=settings,
+        )
 
     return StreamingResponse(gen(), media_type="text/plain")

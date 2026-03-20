@@ -28,6 +28,8 @@ html, body {
     margin: 0;
     min-height: 100%;
     font-family: "Fira Code";
+    background-color: var(--bg);
+    overscroll-behavior: none;
 }
 
 body {
@@ -38,6 +40,7 @@ body {
         radial-gradient(circle at top, rgba(199, 172, 112, 0.10), transparent 28%),
         radial-gradient(circle at 18% 18%, rgba(107, 139, 151, 0.10), transparent 32%),
         linear-gradient(180deg, #091016 0%, var(--bg) 100%);
+    background-color: var(--bg);
     color: var(--text);
     font-family: "Fira Code", sans-serif;
     overflow: hidden;
@@ -65,10 +68,11 @@ body::before {
     display: grid;
     gap: 1.5rem;
     padding: clamp(1.75rem, 4vw, 2.6rem);
-    border: 1px solid var(--border);
-    border-radius: 32px;
-    background: var(--panel);
-    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.26);
+    border: 1px solid rgba(132, 195, 185, 0.12);
+    border-radius: 28px;
+    background: rgba(19, 26, 32, 0.94);
+    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.22);
+    backdrop-filter: blur(14px);
 }
 
 .login-brand {
@@ -183,12 +187,15 @@ body::before {
 .login-form input {
     width: 100%;
     border: 1px solid var(--border);
-    border-radius: 14px;
+    border-radius: 12px;
     background: var(--input);
+    background-color: var(--input);
     color: var(--text);
     font: inherit;
-    padding: 0.75rem .9rem;
+    padding: 0.72rem 0.85rem;
     outline: none;
+    -webkit-appearance: none;
+    appearance: none;
 }
 
 .login-form input:focus {
@@ -198,12 +205,12 @@ body::before {
 .login-form button {
     margin-top: 0.5rem;
     border: 1px solid transparent;
-    border-radius: 14px;
+    border-radius: 12px;
     background: var(--accent);
     color: #0e1418;
     font: inherit;
     font-weight: 700;
-    padding: 0.75rem .9rem;
+    padding: 0.72rem 0.85rem;
     cursor: pointer;
 }
 

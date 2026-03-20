@@ -17,36 +17,42 @@ from src.internal.providers.base import (
     ProviderMessage,
     ProviderTurn,
     RunSettings,
-    SUPPORTED_REASONING_EFFORTS,
     ToolCall,
     ToolDefinition,
 )
 
 
-DEFAULT_OPENROUTER_MODEL = (
-    os.getenv("OPENROUTER_DEFAULT_MODEL", "openrouter/free").strip()
-    or "openrouter/free"
-)
-OPENROUTER_BASE_URL = (
-    os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
-    or "https://openrouter.ai/api/v1"
+OPENAI_BASE_URL = (
+    os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    or "https://api.openai.com/v1"
 )
 
 
-def _openrouter_models() -> list[ProviderModelCapability]:
-    configured = os.getenv("OPENROUTER_MODELS", "").strip()
+def _allowed_openai_models() -> list[str]:
+    configured = os.getenv("OPENAI_ALLOWED_MODELS", "").strip()
     model_ids = [value.strip() for value in configured.split(",") if value.strip()]
     if not model_ids:
-        model_ids = [DEFAULT_OPENROUTER_MODEL]
+        model_ids = ["gpt-5-nano"]
+    return model_ids
 
+
+def _default_openai_model() -> str:
+    configured = os.getenv("OPENAI_DEFAULT_MODEL", "").strip()
+    allowed_models = _allowed_openai_models()
+    if configured and configured in allowed_models:
+        return configured
+    return allowed_models[0]
+
+
+def _openai_models() -> list[ProviderModelCapability]:
     return [
         ProviderModelCapability(
             id=model_id,
             label=model_id,
             supports_temperature=True,
-            supports_reasoning=True,
+            supports_reasoning=False,
         )
-        for model_id in model_ids
+        for model_id in _allowed_openai_models()
     ]
 
 
@@ -57,46 +63,47 @@ def _decode_content(value) -> str:
         return "".join(
             item.get("text", "")
             for item in value
-            if isinstance(item, dict) and item.get("type") == "text"
+            if isinstance(item, dict) and item.get("type") in {"text", "output_text"}
         )
     return ""
 
 
-class OpenRouterProviderAdapter(ProviderAdapter):
-    provider_id = "openrouter"
-    label = "OpenRouter"
+class OpenAIProviderAdapter(ProviderAdapter):
+    provider_id = "openai"
+    label = "OpenAI"
 
     def capability(self) -> ProviderCapability:
         return ProviderCapability(
             id=self.provider_id,
             label=self.label,
-            configured=bool(os.getenv("OPENROUTER_API_KEY")),
-            default_model=DEFAULT_OPENROUTER_MODEL,
+            configured=bool(os.getenv("OPENAI_API_KEY")),
+            default_model=_default_openai_model(),
             supports_system_prompt=True,
             supports_temperature=True,
             supports_browser_tools=True,
-            reasoning_efforts=list(SUPPORTED_REASONING_EFFORTS),
-            allow_custom_models=True,
-            models=_openrouter_models(),
+            reasoning_efforts=[],
+            allow_custom_models=False,
+            models=_openai_models(),
         )
 
     def _headers(self) -> dict[str, str]:
-        api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
-            raise RuntimeError("OpenRouter is not configured on this server.")
+            raise RuntimeError("OpenAI is not configured on this server.")
 
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
-        site_url = os.getenv("OPENROUTER_SITE_URL", "").strip()
-        app_name = os.getenv("OPENROUTER_APP_NAME", "jobber").strip()
-        if site_url:
-            headers["HTTP-Referer"] = site_url
-        if app_name:
-            headers["X-Title"] = app_name
         return headers
+
+    def _enforced_model(self, requested_model: str | None = None) -> str:
+        allowed_models = _allowed_openai_models()
+        requested = (requested_model or "").strip()
+        if requested and requested in allowed_models:
+            return requested
+        return _default_openai_model()
 
     def _messages(
         self,
@@ -157,14 +164,13 @@ class OpenRouterProviderAdapter(ProviderAdapter):
         tools: list[ToolDefinition] | None = None,
     ) -> bytes:
         payload: dict[str, object] = {
-            "model": settings.model or self.capability().default_model,
+            "model": self._enforced_model(settings.model),
             "messages": self._messages(history=history, user_input=user_input, settings=settings),
             "stream": stream,
+            "parallel_tool_calls": False,
         }
         if settings.temperature is not None:
             payload["temperature"] = settings.temperature
-        if settings.reasoning_effort:
-            payload["reasoning"] = {"effort": settings.reasoning_effort}
         if tools:
             payload["tools"] = [
                 {
@@ -182,7 +188,7 @@ class OpenRouterProviderAdapter(ProviderAdapter):
 
     def _iter_stream(self, *, history: list[ConversationMessage], user_input: str, settings: RunSettings):
         request = Request(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
+            f"{OPENAI_BASE_URL}/chat/completions",
             data=self._request_payload(
                 history=history,
                 user_input=user_input,
@@ -211,9 +217,9 @@ class OpenRouterProviderAdapter(ProviderAdapter):
                             yield text
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(body or f"OpenRouter request failed with status {exc.code}.") from exc
+            raise RuntimeError(body or f"OpenAI request failed with status {exc.code}.") from exc
         except URLError as exc:
-            raise RuntimeError(f"OpenRouter request failed: {exc.reason}") from exc
+            raise RuntimeError(f"OpenAI request failed: {exc.reason}") from exc
 
     def _complete(
         self,
@@ -224,7 +230,7 @@ class OpenRouterProviderAdapter(ProviderAdapter):
         tools: list[ToolDefinition] | None = None,
     ) -> dict:
         request = Request(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
+            f"{OPENAI_BASE_URL}/chat/completions",
             data=self._request_payload(
                 history=history,
                 user_input=user_input,
@@ -240,9 +246,9 @@ class OpenRouterProviderAdapter(ProviderAdapter):
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(body or f"OpenRouter request failed with status {exc.code}.") from exc
+            raise RuntimeError(body or f"OpenAI request failed with status {exc.code}.") from exc
         except URLError as exc:
-            raise RuntimeError(f"OpenRouter request failed: {exc.reason}") from exc
+            raise RuntimeError(f"OpenAI request failed: {exc.reason}") from exc
 
     def _to_provider_turn(self, payload: dict) -> ProviderTurn:
         choice = (payload.get("choices") or [{}])[0]

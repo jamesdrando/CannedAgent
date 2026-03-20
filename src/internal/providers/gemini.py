@@ -8,7 +8,10 @@ from src.internal.providers.base import (
     ProviderAdapter,
     ProviderCapability,
     ProviderModelCapability,
+    ProviderMessage,
+    ProviderTurn,
     RunSettings,
+    ToolDefinition,
 )
 
 
@@ -42,6 +45,14 @@ def _to_genai_content(types_module, message: ConversationMessage):
     )
 
 
+def _to_turn_content(types_module, message: ProviderMessage):
+    role = "model" if message.role == "assistant" else "user"
+    return types_module.Content(
+        role=role,
+        parts=[types_module.Part.from_text(text=message.content or "")],
+    )
+
+
 class GeminiProviderAdapter(ProviderAdapter):
     provider_id = "gemini"
     label = "Google Gemini"
@@ -54,6 +65,7 @@ class GeminiProviderAdapter(ProviderAdapter):
             default_model=DEFAULT_GEMINI_MODEL,
             supports_system_prompt=True,
             supports_temperature=True,
+            supports_browser_tools=False,
             reasoning_efforts=[],
             allow_custom_models=True,
             models=_gemini_model_capabilities(),
@@ -81,7 +93,7 @@ class GeminiProviderAdapter(ProviderAdapter):
             model=model,
             history=history_items,
             config=types.GenerateContentConfig(
-                system_instruction=settings.system_prompt,
+                system_instruction=settings.effective_system_prompt,
                 temperature=settings.temperature,
             ),
         )
@@ -89,6 +101,31 @@ class GeminiProviderAdapter(ProviderAdapter):
         async for chunk in stream:
             if chunk.text:
                 yield chunk.text
+
+    async def complete_turn(
+        self,
+        *,
+        history: list[ProviderMessage],
+        settings: RunSettings,
+        tools: list[ToolDefinition] | None = None,
+    ) -> ProviderTurn:
+        try:
+            from google import genai
+            from google.genai import types
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("Gemini support is not installed on this server.") from exc
+
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        client = genai.Client(api_key=api_key) if api_key else genai.Client()
+        response = await client.aio.models.generate_content(
+            model=settings.model or self.capability().default_model,
+            contents=[_to_turn_content(types, message) for message in history],
+            config=types.GenerateContentConfig(
+                system_instruction=settings.effective_system_prompt,
+                temperature=settings.temperature,
+            ),
+        )
+        return ProviderTurn(text=response.text or "")
 
     async def generate_title(
         self,
@@ -115,7 +152,7 @@ class GeminiProviderAdapter(ProviderAdapter):
                 f"Assistant response:\n{assistant_message}"
             ),
             config=types.GenerateContentConfig(
-                system_instruction=settings.system_prompt,
+                system_instruction=settings.effective_system_prompt,
                 temperature=0.2,
                 max_output_tokens=24,
             ),

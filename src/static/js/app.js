@@ -28,6 +28,10 @@ const elements = {
     composer: document.getElementById("composer"),
     input: document.getElementById("input-box"),
     sendButton: document.getElementById("send-button"),
+    attachmentInput: document.getElementById("attachment-input"),
+    attachmentTray: document.getElementById("attachment-tray"),
+    attachmentStatus: document.getElementById("attachment-status"),
+    attachmentPrivacy: document.getElementById("attachment-privacy"),
     settingsForm: document.getElementById("settings-form"),
     settingsCloseButton: document.getElementById("settings-close-button"),
     settingsTargetTitle: document.getElementById("settings-target-title"),
@@ -61,14 +65,175 @@ const state = {
     settingsSaving: false,
     settingsFeedback: "",
     settingsFeedbackTone: "muted",
+    activeRunId: null,
+    attachments: [],
+    toolStatuses: [],
+    attachmentSupport: {
+        supported: typeof Worker !== "undefined" && typeof WebAssembly !== "undefined",
+        ready: false,
+        busy: false,
+        message: "Local analysis loads on first file add and stays in this page session.",
+    },
 };
 
 let renderQueued = false;
+let pyodideBridge = null;
+
+const SUPPORTED_ATTACHMENT_TYPES = new Set([
+    "csv",
+    "tsv",
+    "json",
+    "txt",
+    "md",
+    "xlsx",
+    "pdf",
+    "docx",
+]);
 
 function requestRender() {
     if (renderQueued) return;
     renderQueued = true;
     requestAnimationFrame(render);
+}
+
+function createRequestId(prefix = "id") {
+    if (window.crypto?.randomUUID) {
+        return `${prefix}_${window.crypto.randomUUID()}`;
+    }
+    return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function sanitizeFileName(name) {
+    return (name || "file")
+        .replace(/[^a-zA-Z0-9._-]+/g, "_")
+        .replace(/^_+/, "")
+        || "file";
+}
+
+function fileExtension(name) {
+    const parts = String(name || "").toLowerCase().split(".");
+    return parts.length > 1 ? parts.at(-1) : "";
+}
+
+function attachmentKind(file) {
+    const extension = fileExtension(file.name);
+    return SUPPORTED_ATTACHMENT_TYPES.has(extension) ? extension : "";
+}
+
+function formatFileSize(bytes) {
+    if (!Number.isFinite(bytes)) return "";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+class PyodideBridge {
+    constructor() {
+        this.worker = null;
+        this.pending = new Map();
+        this.readyPromise = null;
+    }
+
+    ensureWorker() {
+        if (this.worker) return;
+        this.worker = new Worker("/static/js/pyodide-worker.js");
+        this.worker.addEventListener("message", (event) => {
+            const { id, ok, output, error, meta } = event.data || {};
+            const pending = this.pending.get(id);
+            if (!pending) return;
+            window.clearTimeout(pending.timeoutId);
+            this.pending.delete(id);
+            if (ok) {
+                pending.resolve({ output, meta });
+            } else {
+                pending.reject(new Error(error || "Worker request failed."));
+            }
+        });
+        this.worker.addEventListener("error", () => {
+            this.rejectAll(new Error("Local analysis runtime crashed."));
+            this.worker = null;
+            this.readyPromise = null;
+        });
+    }
+
+    rejectAll(error) {
+        for (const pending of this.pending.values()) {
+            window.clearTimeout(pending.timeoutId);
+            pending.reject(error);
+        }
+        this.pending.clear();
+    }
+
+    async initialize() {
+        if (this.readyPromise) return this.readyPromise;
+        this.ensureWorker();
+        this.readyPromise = this.request("init", {}, { timeoutMs: 45000 });
+        try {
+            await this.readyPromise;
+        } catch (error) {
+            this.readyPromise = null;
+            throw error;
+        }
+    }
+
+    request(type, args = {}, { timeoutMs = 12000, transfer = [] } = {}) {
+        this.ensureWorker();
+        return new Promise((resolve, reject) => {
+            const id = createRequestId("worker");
+            const timeoutId = window.setTimeout(() => {
+                this.pending.delete(id);
+                this.destroy();
+                reject(new Error("Local analysis timed out and was restarted."));
+            }, timeoutMs);
+            this.pending.set(id, { resolve, reject, timeoutId });
+            this.worker.postMessage({ id, type, args }, transfer);
+        });
+    }
+
+    async addAttachment(fileRecord, file) {
+        await this.initialize();
+        const buffer = await file.arrayBuffer();
+        await this.request(
+            "add_file",
+            {
+                file: fileRecord,
+                bytes: buffer,
+            },
+            { timeoutMs: 30000, transfer: [buffer] },
+        );
+    }
+
+    async clearSession() {
+        if (!this.worker) return;
+        try {
+            await this.request("reset_session", {}, { timeoutMs: 5000 });
+        } catch (error) {
+            this.destroy();
+        }
+    }
+
+    async runTool(name, args) {
+        await this.initialize();
+        const timeoutMs = name === "python.execute" ? 15000 : 12000;
+        const { output } = await this.request("tool", { tool: name, args }, { timeoutMs });
+        return output;
+    }
+
+    destroy() {
+        if (this.worker) {
+            this.worker.terminate();
+            this.worker = null;
+        }
+        this.rejectAll(new Error("Local analysis runtime was reset."));
+        this.readyPromise = null;
+    }
+}
+
+function ensurePyodideBridge() {
+    if (!pyodideBridge) {
+        pyodideBridge = new PyodideBridge();
+    }
+    return pyodideBridge;
 }
 
 function closeSidebar() {
@@ -102,19 +267,21 @@ function normalizeSettings(input = {}) {
     const base = state.defaultSettings || {
         provider: provider?.id || "gemini",
         model: provider?.default_model || "",
-        system_prompt: "You are an AI agent. Respond using GitHub-flavored Markdown.",
+        system_prompt: "Respond using GitHub-flavored Markdown.",
         temperature: null,
         reasoning_effort: null,
     };
     const activeProvider = provider || getProvider(base.provider) || getConfiguredProvider();
     const temperature = input.temperature;
     const reasoningEffort = input.reasoning_effort || null;
+    const rawSystemPrompt = typeof input.system_prompt === "string"
+        ? input.system_prompt
+        : (typeof base.system_prompt === "string" ? base.system_prompt : "");
 
     return {
         provider: activeProvider?.id || base.provider,
         model: (input.model || activeProvider?.default_model || base.model || "").trim(),
-        system_prompt: (input.system_prompt || base.system_prompt || "").trim()
-            || "You are an AI agent. Respond using GitHub-flavored Markdown.",
+        system_prompt: rawSystemPrompt.trim() ? rawSystemPrompt : "Respond using GitHub-flavored Markdown.",
         temperature: typeof temperature === "number" && !Number.isNaN(temperature)
             ? temperature
             : null,
@@ -122,6 +289,11 @@ function normalizeSettings(input = {}) {
             ? reasoningEffort
             : null,
     };
+}
+
+function syncInputValue(input, nextValue) {
+    if (input.value === nextValue) return;
+    input.value = nextValue;
 }
 
 function getActiveSettings() {
@@ -161,6 +333,7 @@ function startNewChat() {
     state.hasDraft = true;
     state.currentChatId = DRAFT_CHAT_ID;
     state.messages = [];
+    clearToolStatuses();
     elements.input.value = state.draftInput;
     closeSidebar();
     requestRender();
@@ -171,6 +344,158 @@ function startNewChat() {
 function resizeInput() {
     elements.input.style.height = "0px";
     elements.input.style.height = `${Math.min(elements.input.scrollHeight, 180)}px`;
+}
+
+function activeProviderSupportsBrowserTools() {
+    const provider = getProvider(getActiveSettings().provider);
+    return Boolean(provider?.supports_browser_tools);
+}
+
+function setAttachmentStatus(message, { busy = false, ready = state.attachmentSupport.ready } = {}) {
+    state.attachmentSupport = {
+        ...state.attachmentSupport,
+        busy,
+        ready,
+        message,
+    };
+    requestRender();
+}
+
+async function ensureAttachmentRuntime() {
+    if (!state.attachmentSupport.supported) {
+        throw new Error("This browser does not support local file analysis.");
+    }
+    try {
+        setAttachmentStatus("Preparing local analysis runtime...", { busy: true, ready: false });
+        await ensurePyodideBridge().initialize();
+        setAttachmentStatus("Local analysis stays in this page session.", { busy: false, ready: true });
+    } catch (error) {
+        setAttachmentStatus(
+            error instanceof Error ? error.message : "Unable to start local analysis runtime.",
+            { busy: false, ready: false },
+        );
+        throw error;
+    }
+}
+
+function clearToolStatuses() {
+    state.toolStatuses = [];
+}
+
+function setToolStatus(toolCallId, name, status) {
+    const existing = state.toolStatuses.find((item) => item.toolCallId === toolCallId);
+    if (existing) {
+        existing.status = status;
+        existing.name = name;
+    } else {
+        state.toolStatuses.push({ toolCallId, name, status });
+    }
+    requestRender();
+}
+
+function removeCompletedToolStatuses() {
+    state.toolStatuses = state.toolStatuses.filter((item) => item.status !== "completed");
+}
+
+function attachmentRecordFromFile(file) {
+    const kind = attachmentKind(file);
+    return {
+        id: createRequestId("file"),
+        name: file.name,
+        mime_type: file.type || "application/octet-stream",
+        size_bytes: file.size,
+        kind,
+        path: `/session/${createRequestId("blob")}_${sanitizeFileName(file.name)}`,
+        file,
+    };
+}
+
+async function addAttachments(fileList) {
+    const files = [...fileList];
+    if (!files.length) return;
+    if (!activeProviderSupportsBrowserTools()) {
+        setAttachmentStatus("Switch to a tool-capable provider such as OpenRouter to analyze files.");
+        return;
+    }
+
+    await ensureAttachmentRuntime();
+
+    for (const file of files) {
+        const kind = attachmentKind(file);
+        if (!kind) {
+            setAttachmentStatus(`Unsupported file type for ${file.name}.`, { ready: true });
+            continue;
+        }
+
+        const record = attachmentRecordFromFile(file);
+        record.kind = kind;
+        try {
+            setAttachmentStatus(`Adding ${file.name} to the local workspace...`, { busy: true, ready: true });
+            await ensurePyodideBridge().addAttachment({
+                id: record.id,
+                name: record.name,
+                mime_type: record.mime_type,
+                size_bytes: record.size_bytes,
+                kind: record.kind,
+                path: record.path,
+            }, file);
+            state.attachments.push(record);
+            setAttachmentStatus("Local analysis stays in this page session.", { busy: false, ready: true });
+        } catch (error) {
+            setAttachmentStatus(
+                error instanceof Error ? error.message : `Unable to add ${file.name}.`,
+                { busy: false, ready: false },
+            );
+            throw error;
+        }
+    }
+
+    requestRender();
+}
+
+async function removeAttachment(attachmentId) {
+    state.attachments = state.attachments.filter((item) => item.id !== attachmentId);
+    clearToolStatuses();
+    if (pyodideBridge) {
+        await pyodideBridge.clearSession();
+        for (const attachment of state.attachments) {
+            await ensurePyodideBridge().addAttachment({
+                id: attachment.id,
+                name: attachment.name,
+                mime_type: attachment.mime_type,
+                size_bytes: attachment.size_bytes,
+                kind: attachment.kind,
+                path: attachment.path,
+            }, attachment.file);
+        }
+    }
+    setAttachmentStatus("Local analysis stays in this page session.", { busy: false, ready: true });
+    requestRender();
+}
+
+async function resetAttachments() {
+    state.attachments = [];
+    clearToolStatuses();
+    if (pyodideBridge) {
+        await pyodideBridge.clearSession();
+    }
+    requestRender();
+}
+
+async function rebuildAttachmentSession() {
+    if (!state.attachments.length) return;
+    await ensureAttachmentRuntime();
+    await ensurePyodideBridge().clearSession();
+    for (const attachment of state.attachments) {
+        await ensurePyodideBridge().addAttachment({
+            id: attachment.id,
+            name: attachment.name,
+            mime_type: attachment.mime_type,
+            size_bytes: attachment.size_bytes,
+            kind: attachment.kind,
+            path: attachment.path,
+        }, attachment.file);
+    }
 }
 
 async function parseError(response) {
@@ -302,6 +627,18 @@ function renderChatList() {
 }
 
 function renderMessage(message) {
+    const toolMarkup = message.role === "assistant" && Array.isArray(message.toolCalls) && message.toolCalls.length
+        ? `
+            <div class="tool-status-list">
+                ${message.toolCalls.map((tool) => `
+                    <span class="tool-status-chip">
+                        ${escapeHtml(tool.name)}
+                        <strong>${escapeHtml(tool.status)}</strong>
+                    </span>
+                `).join("")}
+            </div>
+        `
+        : "";
     const body = message.role === "assistant"
         ? (
             message.content.trim()
@@ -312,7 +649,7 @@ function renderMessage(message) {
 
     return `
         <article class="message message-${message.role}">
-            <div class="message-body ${message.role}-body">${body}</div>
+            <div class="message-body ${message.role}-body">${toolMarkup}${body}</div>
         </article>
     `;
 }
@@ -357,6 +694,42 @@ function renderThread() {
     elements.thread.innerHTML = visibleMessages.map(renderMessage).join("");
     enhanceCodeBlocks();
     elements.thread.scrollTop = elements.thread.scrollHeight;
+}
+
+function renderAttachments() {
+    const providerSupportsTools = activeProviderSupportsBrowserTools();
+    elements.attachmentInput.disabled = state.streaming || !providerSupportsTools;
+    elements.attachmentPrivacy.hidden = !state.attachmentSupport.supported;
+
+    if (!state.attachmentSupport.supported) {
+        elements.attachmentStatus.textContent = "This browser does not support local file analysis.";
+    } else if (!providerSupportsTools) {
+        elements.attachmentStatus.textContent = "Switch to a tool-capable provider such as OpenRouter to analyze files.";
+    } else {
+        elements.attachmentStatus.textContent = state.attachmentSupport.message;
+    }
+
+    if (!state.attachments.length) {
+        elements.attachmentTray.hidden = true;
+        elements.attachmentTray.innerHTML = "";
+        return;
+    }
+
+    elements.attachmentTray.hidden = false;
+    elements.attachmentTray.innerHTML = state.attachments.map((attachment) => `
+        <div class="attachment-chip">
+            <strong>${escapeHtml(attachment.name)}</strong>
+            <span>${escapeHtml(attachment.kind.toUpperCase())} · ${escapeHtml(formatFileSize(attachment.size_bytes))}</span>
+            <button
+                type="button"
+                class="attachment-remove"
+                data-attachment-id="${escapeHtml(attachment.id)}"
+                aria-label="Remove ${escapeHtml(attachment.name)}"
+            >
+                Remove
+            </button>
+        </div>
+    `).join("");
 }
 
 function renderUser() {
@@ -409,13 +782,17 @@ function syncSettingsControls() {
     renderProviderOptions(provider.id);
     renderModelSuggestions(provider);
 
-    elements.modelInput.value = settings.model || provider.default_model || "";
-    elements.modelInput.placeholder = provider.default_model || "Model ID";
-    elements.systemPromptInput.value = settings.system_prompt || "";
+    syncInputValue(elements.modelInput, settings.model || provider.default_model || "");
+    elements.modelInput.placeholder = provider.allow_custom_models
+        ? (provider.default_model || "Model ID")
+        : "Locked by server";
+    elements.modelInput.disabled = !provider.allow_custom_models;
+    syncInputValue(elements.systemPromptInput, settings.system_prompt || "");
     elements.temperatureInput.disabled = !provider.supports_temperature;
-    elements.temperatureInput.value = typeof settings.temperature === "number"
-        ? String(settings.temperature)
-        : "";
+    syncInputValue(
+        elements.temperatureInput,
+        typeof settings.temperature === "number" ? String(settings.temperature) : "",
+    );
 
     const reasoningOptions = ['<option value="">Disabled</option>']
         .concat((provider.reasoning_efforts || []).map((level) => `
@@ -435,11 +812,18 @@ function syncSettingsControls() {
         : "Applies to the next new conversation";
 
     const modelCount = provider.models?.length || 0;
-    const modelCopy = modelCount
-        ? `${modelCount} suggested model${modelCount === 1 ? "" : "s"} available.`
-        : "Use any valid model id for this provider.";
+    const modelCopy = !provider.allow_custom_models
+        ? `Model is server-locked to ${provider.default_model}.`
+        : (
+            modelCount
+                ? `${modelCount} suggested model${modelCount === 1 ? "" : "s"} available.`
+                : "Use any valid model id for this provider."
+        );
+    const toolCopy = provider.supports_browser_tools
+        ? " Browser-local file tools are available."
+        : " Browser-local file analysis is unavailable on this provider.";
     elements.settingsHint.textContent = provider.configured
-        ? `${provider.label} is ready. ${modelCopy}`
+        ? `${provider.label} is ready. ${modelCopy}${toolCopy}`
         : `${provider.label} is not configured on this server yet.`;
 
     elements.saveSettingsButton.hidden = !targetIsSavedChat;
@@ -467,7 +851,12 @@ function syncSettingsControls() {
 }
 
 function syncControls() {
-    elements.sendButton.disabled = state.streaming || !elements.input.value.trim();
+    elements.sendButton.disabled = (
+        state.streaming
+        || !elements.input.value.trim()
+        || (state.attachments.length > 0 && !activeProviderSupportsBrowserTools())
+        || state.attachmentSupport.busy
+    );
     elements.renameChatButton.disabled = !state.currentChatId || state.currentChatId === DRAFT_CHAT_ID || state.streaming;
     elements.deleteChatButton.disabled = !state.currentChatId || state.currentChatId === DRAFT_CHAT_ID || state.streaming;
     elements.newChatButton.disabled = state.streaming;
@@ -485,6 +874,7 @@ function render() {
     renderTitle();
     renderChatList();
     renderThread();
+    renderAttachments();
     syncControls();
 }
 
@@ -498,6 +888,7 @@ function markSettingsDirty() {
     state.settingsDirty = true;
     state.settingsFeedback = "";
     syncSettingsControls();
+    requestRender();
 }
 
 async function fetchCurrentUser() {
@@ -531,6 +922,7 @@ async function loadChat(chatId) {
         state.currentChatId = DRAFT_CHAT_ID;
         state.messages = [];
         state.chatSettings = null;
+        clearToolStatuses();
         state.settingsDirty = false;
         elements.input.value = state.draftInput;
         closeSidebar();
@@ -542,6 +934,7 @@ async function loadChat(chatId) {
     state.currentChatId = payload.id;
     state.messages = payload.messages;
     state.chatSettings = normalizeSettings(payload.settings || state.userPreferences);
+    clearToolStatuses();
     state.settingsDirty = false;
     state.settingsFeedback = "";
     elements.input.value = "";
@@ -634,9 +1027,167 @@ async function saveDefaults() {
     }
 }
 
+function currentAttachmentManifest() {
+    return state.attachments.map((attachment) => ({
+        id: attachment.id,
+        name: attachment.name,
+        mime_type: attachment.mime_type,
+        size_bytes: attachment.size_bytes,
+        kind: attachment.kind,
+    }));
+}
+
+function syncAssistantToolState(assistantMessage) {
+    assistantMessage.toolCalls = state.toolStatuses.map((tool) => ({
+        name: tool.name,
+        status: tool.status,
+    }));
+}
+
+function summarizeToolOutput(output) {
+    if (!output) return "";
+    if (typeof output.summary_for_model === "string" && output.summary_for_model) {
+        return output.summary_for_model;
+    }
+    const serialized = JSON.stringify(output);
+    return serialized.length > 4000 ? `${serialized.slice(0, 3997)}...` : serialized;
+}
+
+async function executeBrowserToolCall(toolCall, assistantMessage) {
+    setToolStatus(toolCall.tool_call_id, toolCall.name, "running");
+    syncAssistantToolState(assistantMessage);
+    requestRender();
+
+    try {
+        const output = await ensurePyodideBridge().runTool(toolCall.name, toolCall.arguments || {});
+        setToolStatus(toolCall.tool_call_id, toolCall.name, "completed");
+        syncAssistantToolState(assistantMessage);
+        requestRender();
+        return {
+            tool_call_id: toolCall.tool_call_id,
+            name: toolCall.name,
+            output,
+            summary_for_model: summarizeToolOutput(output),
+        };
+    } catch (error) {
+        setToolStatus(toolCall.tool_call_id, toolCall.name, "failed");
+        syncAssistantToolState(assistantMessage);
+        requestRender();
+        const message = error instanceof Error ? error.message : "Unknown tool failure";
+        return {
+            tool_call_id: toolCall.tool_call_id,
+            name: toolCall.name,
+            output: { error: message },
+            summary_for_model: `Tool failed: ${message}`,
+        };
+    }
+}
+
+async function submitToolResults(runId, results) {
+    await api(`/api/runs/${runId}/tool-results`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ results }),
+    });
+}
+
+async function consumeRunStream(response, assistantMessage) {
+    if (!response.body) {
+        throw new Error("The server returned an empty response body.");
+    }
+
+    const reader = response.body
+        .pipeThrough(new TextDecoderStream())
+        .getReader();
+    const pendingToolCalls = [];
+    let buffer = "";
+
+    while (true) {
+        const { value, done } = await reader.read();
+        if (value) {
+            buffer += value;
+            while (buffer.includes("\n")) {
+                const newlineIndex = buffer.indexOf("\n");
+                const rawLine = buffer.slice(0, newlineIndex);
+                buffer = buffer.slice(newlineIndex + 1);
+                const line = rawLine.trim();
+                if (!line) continue;
+                const event = JSON.parse(line);
+
+                if (event.type === "run.started") {
+                    state.activeRunId = event.run_id;
+                    continue;
+                }
+
+                if (event.type === "tool.call.requested") {
+                    pendingToolCalls.push(event);
+                    setToolStatus(event.tool_call_id, event.name, "queued");
+                    syncAssistantToolState(assistantMessage);
+                    requestRender();
+                    continue;
+                }
+
+                if (event.type === "run.awaiting_tool_results") {
+                    const requestedCalls = pendingToolCalls.splice(0, pendingToolCalls.length);
+                    const results = await Promise.all(
+                        requestedCalls.map((toolCall) => executeBrowserToolCall(toolCall, assistantMessage)),
+                    );
+                    await submitToolResults(event.run_id, results);
+                    syncAssistantToolState(assistantMessage);
+                    requestRender();
+                    continue;
+                }
+
+                if (event.type === "tool.call.completed") {
+                    setToolStatus(event.tool_call_id, event.name, "completed");
+                    syncAssistantToolState(assistantMessage);
+                    requestRender();
+                    continue;
+                }
+
+                if (event.type === "message.delta") {
+                    assistantMessage.content += event.delta || "";
+                    requestRender();
+                    continue;
+                }
+
+                if (event.type === "message.completed") {
+                    assistantMessage.content = event.content || assistantMessage.content;
+                    requestRender();
+                    continue;
+                }
+
+                if (event.type === "run.failed") {
+                    throw new Error(event.error || "Run failed.");
+                }
+
+                if (event.type === "run.completed") {
+                    state.activeRunId = null;
+                    return;
+                }
+            }
+        }
+
+        if (done) break;
+    }
+
+    if (buffer.trim()) {
+        const event = JSON.parse(buffer.trim());
+        if (event.type === "run.failed") {
+            throw new Error(event.error || "Run failed.");
+        }
+    }
+}
+
 async function sendMessage() {
     const content = elements.input.value.trim();
     if (!content || state.streaming) return;
+    if (state.attachments.length && !activeProviderSupportsBrowserTools()) {
+        setAttachmentStatus("Switch to a tool-capable provider such as OpenRouter to analyze files.");
+        return;
+    }
 
     try {
         if (state.currentChatId && state.currentChatId !== DRAFT_CHAT_ID && state.settingsDirty) {
@@ -655,7 +1206,7 @@ async function sendMessage() {
     }
 
     const chatId = state.currentChatId;
-    const assistantMessage = { role: "assistant", content: "" };
+    const assistantMessage = { role: "assistant", content: "", toolCalls: [] };
 
     state.messages.push({ role: "user", content });
     state.messages.push(assistantMessage);
@@ -667,12 +1218,18 @@ async function sendMessage() {
     let requestSucceeded = false;
 
     try {
-        const response = await fetch(`/api/chats/${chatId}/messages`, {
+        if (state.attachments.length) {
+            await rebuildAttachmentSession();
+        }
+        const response = await fetch(`/api/chats/${chatId}/runs`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
             },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify({
+                input: content,
+                attachment_manifest: currentAttachmentManifest(),
+            }),
         });
 
         if (response.status === 401) {
@@ -683,32 +1240,18 @@ async function sendMessage() {
         if (!response.ok) {
             throw new Error(await parseError(response));
         }
-
-        if (!response.body) {
-            throw new Error("The server returned an empty response body.");
-        }
-
-        const reader = response.body
-            .pipeThrough(new TextDecoderStream())
-            .getReader();
-
-        while (true) {
-            const { value, done } = await reader.read();
-            if (value) {
-                assistantMessage.content += value;
-                requestRender();
-            }
-            if (done) break;
-        }
-
+        await consumeRunStream(response, assistantMessage);
         requestSucceeded = true;
     } catch (error) {
         assistantMessage.content = `### Request failed\n\n${
             error instanceof Error ? error.message : "Unknown error"
         }`;
+        clearToolStatuses();
     } finally {
         state.streaming = false;
+        state.activeRunId = null;
         if (requestSucceeded) {
+            clearToolStatuses();
             await refreshSidebarAndChat();
         } else {
             requestRender();
@@ -737,6 +1280,10 @@ async function renameCurrentChat() {
 }
 
 async function logout() {
+    await resetAttachments();
+    if (pyodideBridge) {
+        pyodideBridge.destroy();
+    }
     await fetch("/api/auth/logout", { method: "POST" });
     window.location.href = "/login";
 }
@@ -851,6 +1398,34 @@ elements.chatList.addEventListener("click", async (event) => {
     await loadChat(button.dataset.chatId);
 });
 
+elements.attachmentInput.addEventListener("change", async (event) => {
+    const { files } = event.target;
+    if (!files?.length) return;
+    try {
+        await addAttachments(files);
+    } catch (error) {
+        setAttachmentStatus(
+            error instanceof Error ? error.message : "Unable to add those files.",
+            { busy: false, ready: false },
+        );
+    } finally {
+        elements.attachmentInput.value = "";
+    }
+});
+
+elements.attachmentTray.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-attachment-id]");
+    if (!button) return;
+    try {
+        await removeAttachment(button.dataset.attachmentId);
+    } catch (error) {
+        setAttachmentStatus(
+            error instanceof Error ? error.message : "Unable to update local files.",
+            { busy: false, ready: false },
+        );
+    }
+});
+
 elements.sidebarToggleButton.addEventListener("click", () => {
     elements.appLayout.classList.toggle("sidebar-open");
 });
@@ -928,11 +1503,20 @@ elements.saveDefaultsButton.addEventListener("click", async () => {
     }
 });
 
+window.addEventListener("beforeunload", () => {
+    if (pyodideBridge) {
+        pyodideBridge.destroy();
+    }
+});
+
 async function init() {
     await fetchCurrentUser();
     await fetchProviders();
     await fetchPreferences();
     await fetchChats();
+    if (!state.attachmentSupport.supported) {
+        setAttachmentStatus("This browser does not support local file analysis.", { ready: false });
+    }
     if (state.chats.length) {
         await loadChat(state.chats[0].id);
     } else {

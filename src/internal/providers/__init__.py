@@ -1,19 +1,35 @@
 from src.internal.providers.base import (
+    ADMIN_SYSTEM_PROMPT,
     ConversationMessage,
+    DEFAULT_USER_SYSTEM_PROMPT,
     DEFAULT_SYSTEM_PROMPT,
+    ProviderMessage,
     ProviderCapability,
     ProviderModelCapability,
+    ProviderTurn,
     RunSettings,
     RunSettingsPatch,
+    ToolCall,
+    ToolDefinition,
+    ToolResult,
+    compose_system_prompt,
 )
 from src.internal.providers.registry import ProviderRegistry
 
 __all__ = [
+    "ADMIN_SYSTEM_PROMPT",
     "ConversationMessage",
+    "DEFAULT_USER_SYSTEM_PROMPT",
     "DEFAULT_SYSTEM_PROMPT",
+    "ProviderMessage",
     "ProviderCapability",
     "ProviderModelCapability",
     "ProviderRegistry",
+    "ProviderTurn",
     "RunSettings",
     "RunSettingsPatch",
+    "ToolCall",
+    "ToolDefinition",
+    "ToolResult",
+    "compose_system_prompt",
 ]

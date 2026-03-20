@@ -2,18 +2,21 @@ from __future__ import annotations
 
 from src.internal.providers.base import (
     DEFAULT_PROVIDER_ID,
-    DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_USER_SYSTEM_PROMPT,
     ProviderCapability,
     RunSettings,
     RunSettingsPatch,
+    normalize_user_system_prompt,
 )
 from src.internal.providers.gemini import GeminiProviderAdapter
+from src.internal.providers.openai import OpenAIProviderAdapter
 from src.internal.providers.openrouter import OpenRouterProviderAdapter
 
 
 class ProviderRegistry:
     def __init__(self) -> None:
         adapters = [
+            OpenAIProviderAdapter(),
             GeminiProviderAdapter(),
             OpenRouterProviderAdapter(),
         ]
@@ -55,7 +58,11 @@ class ProviderRegistry:
         capability = self.capability_for(str(data.get("provider") or "").strip()) or self.default_capability()
         provider = capability.id
         model = str(data.get("model") or "").strip() or capability.default_model
-        system_prompt = str(data.get("system_prompt") or "").strip() or DEFAULT_SYSTEM_PROMPT
+        if not capability.allow_custom_models:
+            allowed_model_ids = {model.id for model in capability.models}
+            if model not in allowed_model_ids:
+                model = capability.default_model
+        system_prompt = normalize_user_system_prompt(data.get("system_prompt")) or DEFAULT_USER_SYSTEM_PROMPT
         temperature = data.get("temperature")
         reasoning_effort = data.get("reasoning_effort")
 

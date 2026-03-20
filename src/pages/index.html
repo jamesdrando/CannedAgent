@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0d1114">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -103,6 +104,7 @@
                 <label class="settings-field">
                     <span>System prompt</span>
                     <textarea id="settings-system-prompt" rows="8" placeholder="System prompt"></textarea>
+                    <small class="settings-inline-note">Jobbr adds a hidden administrative prefix server-side on every run.</small>
                 </label>
 
                 <div class="settings-grid">
@@ -206,12 +208,29 @@
             <section id="chat-thread" class="chat-thread"></section>
 
             <form id="composer" class="composer">
-                <textarea
-                    id="input-box"
-                    rows="1"
-                    placeholder="Message jobbr"
-                    spellcheck="true"
-                ></textarea>
+                <div class="composer-main">
+                    <div class="attachment-toolbar">
+                        <label for="attachment-input" class="ghost-button attachment-button">Files</label>
+                        <input
+                            id="attachment-input"
+                            type="file"
+                            multiple
+                            hidden
+                            accept=".csv,.tsv,.json,.txt,.md,.xlsx,.pdf,.docx,text/csv,text/tab-separated-values,application/json,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        >
+                        <p id="attachment-status" class="attachment-status">Local analysis stays in this page session.</p>
+                    </div>
+                    <div id="attachment-tray" class="attachment-tray" hidden></div>
+                    <p id="attachment-privacy" class="attachment-privacy">
+                        Files are not uploaded to the internet or stored on the Jobbr website. They only exist while this page stays open.
+                    </p>
+                    <textarea
+                        id="input-box"
+                        rows="1"
+                        placeholder="Message jobbr"
+                        spellcheck="true"
+                    ></textarea>
+                </div>
                 <button id="send-button" type="submit">Send</button>
             </form>
         </section>
