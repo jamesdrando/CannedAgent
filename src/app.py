@@ -61,7 +61,7 @@ provider_registry = ProviderRegistry()
 db_session_dep = Annotated[Session, Depends(get_db_session)]
 login_attempts: dict[str, deque[float]] = defaultdict(deque)
 active_runs: dict[str, "ActiveRun"] = {}
-MAX_TOOL_ITERATIONS = 6
+MAX_TOOL_ITERATIONS = 10
 
 
 @dataclass
@@ -203,9 +203,16 @@ def browser_tool_usage_guidance() -> str:
         "Browser-local files are available for this run only. "
         "They are not stored on the Jobbr website and should be accessed via the available tools.\n"
         "If you need file inspection or analysis, use the provider's native tool/function calling mechanism.\n"
+        "Prefer the minimum number of tool calls needed. If a tool result already answers the user's question, "
+        "respond directly instead of calling more tools.\n"
         "Do not print tool invocations as plain text, JSON blobs, XML, or wrappers such as TOOLCALL>...ALL>.\n"
         "Either answer normally, or request one of the available tools directly."
     )
+
+
+def tool_call_signature(tool_call: ToolCall) -> str:
+    serialized_arguments = json.dumps(tool_call.arguments, sort_keys=True, default=str)
+    return f"{tool_call.name}:{serialized_arguments}"
 
 
 def parse_inline_tool_calls(text: str) -> list[dict[str, Any]]:
@@ -827,6 +834,7 @@ async def create_run(
 
     async def gen():
         assistant_text = ""
+        cached_tool_results: dict[str, ToolResult] = {}
         try:
             yield run_event(
                 run_id,
@@ -854,8 +862,26 @@ async def create_run(
                         ]
                         turn.text = ""
                 if turn.tool_calls:
-                    pending_ids = {tool_call.id for tool_call in turn.tool_calls}
-                    if not pending_ids:
+                    pending_ids: set[str] = set()
+                    reused_results: list[ToolResult] = []
+                    for tool_call in turn.tool_calls:
+                        signature = tool_call_signature(tool_call)
+                        cached_result = cached_tool_results.get(signature)
+                        if cached_result is None:
+                            pending_ids.add(tool_call.id)
+                            continue
+                        reused_results.append(
+                            ToolResult(
+                                tool_call_id=tool_call.id,
+                                name=tool_call.name,
+                                output=cached_result.output,
+                                summary_for_model=(
+                                    f"{cached_result.summary_for_model}\n"
+                                    "This exact tool request was already completed earlier in the run."
+                                ).strip(),
+                            )
+                        )
+                    if not pending_ids and not reused_results:
                         raise RuntimeError("The model requested a tool call without an id.")
 
                     history.append(
@@ -867,7 +893,25 @@ async def create_run(
                     )
                     active_run.pending_tool_call_ids = pending_ids
 
+                    for reused_result in reused_results:
+                        history.append(
+                            ProviderMessage(
+                                role="tool",
+                                content=tool_content_for_model(reused_result),
+                                tool_call_id=reused_result.tool_call_id,
+                                tool_name=reused_result.name,
+                            )
+                        )
+                        yield run_event(
+                            run_id,
+                            "tool.call.completed",
+                            tool_call_id=reused_result.tool_call_id,
+                            name=reused_result.name,
+                        )
+
                     for tool_call in turn.tool_calls:
+                        if tool_call.id not in pending_ids:
+                            continue
                         yield run_event(
                             run_id,
                             "tool.call.requested",
@@ -875,11 +919,12 @@ async def create_run(
                             name=tool_call.name,
                             arguments=tool_call.arguments,
                         )
-                    yield run_event(
-                        run_id,
-                        "run.awaiting_tool_results",
-                        pending_tool_call_ids=sorted(active_run.pending_tool_call_ids),
-                    )
+                    if pending_ids:
+                        yield run_event(
+                            run_id,
+                            "run.awaiting_tool_results",
+                            pending_tool_call_ids=sorted(active_run.pending_tool_call_ids),
+                        )
 
                     while active_run.pending_tool_call_ids:
                         results = await active_run.tool_result_queue.get()
@@ -887,6 +932,16 @@ async def create_run(
                             if result.tool_call_id not in active_run.pending_tool_call_ids:
                                 continue
                             active_run.pending_tool_call_ids.remove(result.tool_call_id)
+                            matching_tool_call = next(
+                                (
+                                    candidate
+                                    for candidate in turn.tool_calls
+                                    if candidate.id == result.tool_call_id
+                                ),
+                                None,
+                            )
+                            if matching_tool_call is not None:
+                                cached_tool_results[tool_call_signature(matching_tool_call)] = result
                             history.append(
                                 ProviderMessage(
                                     role="tool",
@@ -901,6 +956,17 @@ async def create_run(
                                 tool_call_id=result.tool_call_id,
                                 name=result.name,
                             )
+                    if len(cached_tool_results) >= 2:
+                        history.append(
+                            ProviderMessage(
+                                role="user",
+                                content=(
+                                    "You now have tool results for this request. "
+                                    "If those results are sufficient, answer the user directly without "
+                                    "requesting more tools."
+                                ),
+                            )
+                        )
                     continue
 
                 assistant_text = turn.text.strip()

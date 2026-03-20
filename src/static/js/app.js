@@ -37,8 +37,8 @@ const elements = {
     settingsTargetTitle: document.getElementById("settings-target-title"),
     settingsTargetDetail: document.getElementById("settings-target-detail"),
     providerSelect: document.getElementById("settings-provider"),
+    modelSelect: document.getElementById("settings-model-select"),
     modelInput: document.getElementById("settings-model"),
-    modelSuggestions: document.getElementById("model-suggestions"),
     systemPromptInput: document.getElementById("settings-system-prompt"),
     temperatureInput: document.getElementById("settings-temperature"),
     reasoningSelect: document.getElementById("settings-reasoning"),
@@ -61,6 +61,7 @@ const state = {
     userPreferences: null,
     draftSettings: null,
     chatSettings: null,
+    modelSelectionMode: "preset",
     settingsDirty: false,
     settingsSaving: false,
     settingsFeedback: "",
@@ -265,7 +266,7 @@ function getProvider(providerId) {
 function normalizeSettings(input = {}) {
     const provider = getProvider(input.provider) || getConfiguredProvider();
     const base = state.defaultSettings || {
-        provider: provider?.id || "gemini",
+        provider: provider?.id || "openai",
         model: provider?.default_model || "",
         system_prompt: "Respond using GitHub-flavored Markdown.",
         temperature: null,
@@ -333,6 +334,7 @@ function startNewChat() {
     state.hasDraft = true;
     state.currentChatId = DRAFT_CHAT_ID;
     state.messages = [];
+    state.modelSelectionMode = "preset";
     clearToolStatuses();
     elements.input.value = state.draftInput;
     closeSidebar();
@@ -626,7 +628,35 @@ function renderChatList() {
     `).join("");
 }
 
-function renderMessage(message) {
+function renderStatusLine(label, { inline = false, subtle = false } = {}) {
+    return `
+        <span class="status-line ${inline ? "status-line-inline" : ""} ${subtle ? "status-line-subtle" : ""}">
+            <span class="ring-loader" aria-hidden="true"></span>
+            <span>${escapeHtml(label)}</span>
+        </span>
+    `;
+}
+
+function activeAssistantStatus(message, index, messages) {
+    if (!state.streaming || message.role !== "assistant" || index !== messages.length - 1) {
+        return "";
+    }
+    const runningTool = state.toolStatuses.find((tool) => tool.status === "running");
+    if (runningTool) {
+        return `Working with local files via ${runningTool.name}`;
+    }
+    const queuedTool = state.toolStatuses.find((tool) => tool.status === "queued");
+    if (queuedTool) {
+        return `Preparing ${queuedTool.name}`;
+    }
+    return message.content.trim() ? "Streaming response" : "Thinking";
+}
+
+function renderMessage(message, index, messages) {
+    const assistantStatus = activeAssistantStatus(message, index, messages);
+    const statusMarkup = assistantStatus
+        ? `<div class="message-status-row">${renderStatusLine(assistantStatus)}</div>`
+        : "";
     const toolMarkup = message.role === "assistant" && Array.isArray(message.toolCalls) && message.toolCalls.length
         ? `
             <div class="tool-status-list">
@@ -643,13 +673,13 @@ function renderMessage(message) {
         ? (
             message.content.trim()
                 ? md.render(message.content)
-                : '<div class="message-placeholder">Streaming reply<span></span><span></span><span></span></div>'
+                : (assistantStatus ? "" : '<div class="message-placeholder">Waiting for response</div>')
         )
         : `<p>${formatUserText(message.content)}</p>`;
 
     return `
         <article class="message message-${message.role}">
-            <div class="message-body ${message.role}-body">${toolMarkup}${body}</div>
+            <div class="message-body ${message.role}-body">${statusMarkup}${toolMarkup}${body}</div>
         </article>
     `;
 }
@@ -701,13 +731,17 @@ function renderAttachments() {
     elements.attachmentInput.disabled = state.streaming || !providerSupportsTools;
     elements.attachmentPrivacy.hidden = !state.attachmentSupport.supported;
 
+    let attachmentStatusMessage = "";
     if (!state.attachmentSupport.supported) {
-        elements.attachmentStatus.textContent = "This browser does not support local file analysis.";
+        attachmentStatusMessage = "This browser does not support local file analysis.";
     } else if (!providerSupportsTools) {
-        elements.attachmentStatus.textContent = "Switch to a tool-capable provider such as OpenRouter to analyze files.";
+        attachmentStatusMessage = "Switch to a tool-capable provider such as OpenRouter to analyze files.";
     } else {
-        elements.attachmentStatus.textContent = state.attachmentSupport.message;
+        attachmentStatusMessage = state.attachmentSupport.message;
     }
+    elements.attachmentStatus.innerHTML = state.attachmentSupport.busy
+        ? renderStatusLine(attachmentStatusMessage, { inline: true, subtle: true })
+        : `<span>${escapeHtml(attachmentStatusMessage)}</span>`;
 
     if (!state.attachments.length) {
         elements.attachmentTray.hidden = true;
@@ -760,10 +794,39 @@ function renderProviderOptions(activeProviderId) {
     }
 }
 
-function renderModelSuggestions(provider) {
-    elements.modelSuggestions.innerHTML = (provider?.models || []).map((model) => `
-        <option value="${escapeHtml(model.id)}">${escapeHtml(model.label)}</option>
-    `).join("");
+function renderModelControl(provider, settings) {
+    const models = provider?.models || [];
+    const modelIds = new Set(models.map((model) => model.id));
+    const currentModel = settings.model || provider?.default_model || "";
+    const customModeRequested = state.modelSelectionMode === "custom" && Boolean(provider?.allow_custom_models);
+    const usingCustomModel = Boolean(
+        provider?.allow_custom_models && (customModeRequested || (currentModel && !modelIds.has(currentModel)))
+    );
+    const showInput = !models.length || (provider?.allow_custom_models && usingCustomModel);
+
+    if (models.length) {
+        const options = models.map((model) => `
+            <option value="${escapeHtml(model.id)}">${escapeHtml(model.label)}</option>
+        `);
+        if (provider?.allow_custom_models) {
+            options.push('<option value="__custom__">Custom model…</option>');
+        }
+        elements.modelSelect.innerHTML = options.join("");
+        elements.modelSelect.hidden = false;
+        elements.modelSelect.disabled = false;
+        elements.modelSelect.value = usingCustomModel ? "__custom__" : (currentModel || provider.default_model || models[0].id);
+    } else {
+        elements.modelSelect.hidden = true;
+        elements.modelSelect.innerHTML = "";
+        elements.modelSelect.disabled = true;
+    }
+
+    syncInputValue(elements.modelInput, showInput ? currentModel : "");
+    elements.modelInput.placeholder = provider?.allow_custom_models
+        ? (provider?.default_model || "Model ID")
+        : "Locked by server";
+    elements.modelInput.hidden = !showInput;
+    elements.modelInput.disabled = !provider?.allow_custom_models;
 }
 
 function syncSettingsControls() {
@@ -780,13 +843,7 @@ function syncSettingsControls() {
     }
 
     renderProviderOptions(provider.id);
-    renderModelSuggestions(provider);
-
-    syncInputValue(elements.modelInput, settings.model || provider.default_model || "");
-    elements.modelInput.placeholder = provider.allow_custom_models
-        ? (provider.default_model || "Model ID")
-        : "Locked by server";
-    elements.modelInput.disabled = !provider.allow_custom_models;
+    renderModelControl(provider, settings);
     syncInputValue(elements.systemPromptInput, settings.system_prompt || "");
     elements.temperatureInput.disabled = !provider.supports_temperature;
     syncInputValue(
@@ -922,6 +979,7 @@ async function loadChat(chatId) {
         state.currentChatId = DRAFT_CHAT_ID;
         state.messages = [];
         state.chatSettings = null;
+        state.modelSelectionMode = "preset";
         clearToolStatuses();
         state.settingsDirty = false;
         elements.input.value = state.draftInput;
@@ -934,6 +992,7 @@ async function loadChat(chatId) {
     state.currentChatId = payload.id;
     state.messages = payload.messages;
     state.chatSettings = normalizeSettings(payload.settings || state.userPreferences);
+    state.modelSelectionMode = "preset";
     clearToolStatuses();
     state.settingsDirty = false;
     state.settingsFeedback = "";
@@ -955,6 +1014,7 @@ async function createChat() {
     state.currentChatId = chat.id;
     state.messages = [];
     state.chatSettings = normalizeSettings(settings);
+    state.modelSelectionMode = "preset";
     state.hasDraft = false;
     state.draftInput = "";
     state.draftSettings = normalizeSettings(state.userPreferences || state.defaultSettings);
@@ -1321,6 +1381,7 @@ function handleSettingsProviderChange() {
     const provider = getProvider(elements.providerSelect.value) || getConfiguredProvider();
     if (!provider) return;
 
+    state.modelSelectionMode = "preset";
     setActiveSettings({
         ...getActiveSettings(),
         provider: provider.id,
@@ -1331,9 +1392,39 @@ function handleSettingsProviderChange() {
 }
 
 function handleSettingsModelInput() {
+    state.modelSelectionMode = "custom";
     setActiveSettings({
         ...getActiveSettings(),
         model: elements.modelInput.value.trim(),
+    });
+    markSettingsDirty();
+}
+
+function handleSettingsModelSelectChange() {
+    const provider = getProvider(elements.providerSelect.value) || getConfiguredProvider();
+    if (!provider) return;
+
+    if (elements.modelSelect.value === "__custom__") {
+        state.modelSelectionMode = "custom";
+        const currentModel = getActiveSettings().model;
+        const knownModelIds = new Set((provider.models || []).map((model) => model.id));
+        setActiveSettings({
+            ...getActiveSettings(),
+            model: knownModelIds.has(currentModel) ? "" : currentModel,
+        });
+        markSettingsDirty();
+        requestAnimationFrame(() => {
+            if (!elements.modelInput.hidden) {
+                elements.modelInput.focus();
+            }
+        });
+        return;
+    }
+
+    state.modelSelectionMode = "preset";
+    setActiveSettings({
+        ...getActiveSettings(),
+        model: elements.modelSelect.value,
     });
     markSettingsDirty();
 }
@@ -1475,6 +1566,7 @@ elements.thread.addEventListener("click", async (event) => {
 });
 
 elements.providerSelect.addEventListener("change", handleSettingsProviderChange);
+elements.modelSelect.addEventListener("change", handleSettingsModelSelectChange);
 elements.modelInput.addEventListener("input", handleSettingsModelInput);
 elements.systemPromptInput.addEventListener("input", handleSettingsSystemPromptInput);
 elements.temperatureInput.addEventListener("input", handleSettingsTemperatureInput);
@@ -1517,12 +1609,7 @@ async function init() {
     if (!state.attachmentSupport.supported) {
         setAttachmentStatus("This browser does not support local file analysis.", { ready: false });
     }
-    if (state.chats.length) {
-        await loadChat(state.chats[0].id);
-    } else {
-        ensureDraftSettings();
-        requestRender();
-    }
+    startNewChat();
     resizeInput();
 }
 

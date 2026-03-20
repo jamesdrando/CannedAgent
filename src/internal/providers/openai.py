@@ -49,7 +49,7 @@ def _openai_models() -> list[ProviderModelCapability]:
         ProviderModelCapability(
             id=model_id,
             label=model_id,
-            supports_temperature=True,
+            supports_temperature=False,
             supports_reasoning=False,
         )
         for model_id in _allowed_openai_models()
@@ -68,6 +68,22 @@ def _decode_content(value) -> str:
     return ""
 
 
+def _wire_tool_name(name: str) -> str:
+    return name.replace(".", "_")
+
+
+def _canonical_tool_name(name: str) -> str:
+    known_names = {
+        "files_list": "files.list",
+        "files_describe": "files.describe",
+        "files_read_text": "files.read_text",
+        "tables_preview": "tables.preview",
+        "tables_profile": "tables.profile",
+        "python_execute": "python.execute",
+    }
+    return known_names.get(name, name)
+
+
 class OpenAIProviderAdapter(ProviderAdapter):
     provider_id = "openai"
     label = "OpenAI"
@@ -79,7 +95,7 @@ class OpenAIProviderAdapter(ProviderAdapter):
             configured=bool(os.getenv("OPENAI_API_KEY")),
             default_model=_default_openai_model(),
             supports_system_prompt=True,
-            supports_temperature=True,
+            supports_temperature=False,
             supports_browser_tools=True,
             reasoning_efforts=[],
             allow_custom_models=False,
@@ -126,7 +142,7 @@ class OpenAIProviderAdapter(ProviderAdapter):
                                 "id": tool_call.id,
                                 "type": "function",
                                 "function": {
-                                    "name": tool_call.name,
+                                    "name": _wire_tool_name(tool_call.name),
                                     "arguments": json.dumps(tool_call.arguments),
                                 },
                             }
@@ -169,14 +185,12 @@ class OpenAIProviderAdapter(ProviderAdapter):
             "stream": stream,
             "parallel_tool_calls": False,
         }
-        if settings.temperature is not None:
-            payload["temperature"] = settings.temperature
         if tools:
             payload["tools"] = [
                 {
                     "type": "function",
                     "function": {
-                        "name": tool.name,
+                        "name": _wire_tool_name(tool.name),
                         "description": tool.description,
                         "parameters": tool.parameters,
                     },
@@ -264,7 +278,7 @@ class OpenAIProviderAdapter(ProviderAdapter):
             tool_calls.append(
                 ToolCall(
                     id=raw_call.get("id") or uuid4().hex,
-                    name=function.get("name") or "",
+                    name=_canonical_tool_name(function.get("name") or ""),
                     arguments=arguments,
                 )
             )
