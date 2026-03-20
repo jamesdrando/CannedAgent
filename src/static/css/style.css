@@ -843,6 +843,51 @@ pre, code {
     gap: 0.6rem;
 }
 
+.attachment-security {
+    display: grid;
+    gap: 0.55rem;
+}
+
+.attachment-security-panel {
+    display: grid;
+    gap: 0.55rem;
+    padding: 0.75rem 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.attachment-security-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    align-items: center;
+}
+
+.attachment-persist-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: var(--text);
+    font-size: 0.82rem;
+}
+
+.attachment-persist-toggle input {
+    margin: 0;
+}
+
+.attachment-security-button {
+    padding: 0.42rem 0.68rem;
+    font-size: 0.8rem;
+}
+
+.attachment-security-copy {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+
 .attachment-manager {
     display: grid;
     gap: 0.75rem;

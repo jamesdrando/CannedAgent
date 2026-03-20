@@ -7,8 +7,11 @@ const md = window.markdownit({
 
 const DRAFT_CHAT_ID = "__draft__";
 const ATTACHMENT_DB_NAME = "jobbr-local-files";
-const ATTACHMENT_DB_VERSION = 1;
+const ATTACHMENT_DB_VERSION = 2;
 const ATTACHMENT_STORE_NAME = "attachments";
+const ATTACHMENT_META_STORE_NAME = "meta";
+const ATTACHMENT_VAULT_CONFIG_KEY = "vault-config";
+const ATTACHMENT_KEY_DERIVATION_ITERATIONS = 250000;
 
 const elements = {
     appLayout: document.querySelector(".app-layout"),
@@ -33,6 +36,7 @@ const elements = {
     input: document.getElementById("input-box"),
     sendButton: document.getElementById("send-button"),
     attachmentInput: document.getElementById("attachment-input"),
+    attachmentSecurity: document.getElementById("attachment-security"),
     attachmentTray: document.getElementById("attachment-tray"),
     attachmentStatus: document.getElementById("attachment-status"),
     attachmentPrivacy: document.getElementById("attachment-privacy"),
@@ -76,15 +80,24 @@ const state = {
     toolStatuses: [],
     attachmentSupport: {
         supported: typeof Worker !== "undefined" && typeof WebAssembly !== "undefined",
-        persistence: typeof indexedDB !== "undefined" ? "browser" : "session",
+        persistenceSupported: typeof indexedDB !== "undefined" && Boolean(window.crypto?.subtle),
         ready: false,
         busy: false,
         message: "Local analysis loads on first file add and stays in this page session.",
+    },
+    attachmentSecurity: {
+        persistentOptIn: false,
+        unlocked: false,
+        lockedRecordCount: 0,
+        hasEncryptedVault: false,
+        legacyRecordCount: 0,
     },
 };
 
 let renderQueued = false;
 let pyodideBridge = null;
+let attachmentVaultKey = null;
+let attachmentVaultConfig = null;
 
 const SUPPORTED_ATTACHMENT_TYPES = new Set([
     "csv",
@@ -96,6 +109,8 @@ const SUPPORTED_ATTACHMENT_TYPES = new Set([
     "pdf",
     "docx",
 ]);
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 function requestRender() {
     if (renderQueued) return;
@@ -144,24 +159,25 @@ function totalAttachmentBytes() {
 
 function defaultAttachmentStatusMessage() {
     if (!state.attachments.length) {
-        return state.attachmentSupport.persistence === "browser"
-            ? "Local analysis warms in the background. Files stay in this browser until you remove them."
-            : "Local analysis loads on first file add and stays in this page session.";
+        if (state.attachmentSecurity.lockedRecordCount > 0) {
+            return `${attachmentCountLabel(state.attachmentSecurity.lockedRecordCount)} remembered on this device and locked.`;
+        }
+        return "Local analysis keeps files in this session unless you turn on encrypted device storage.";
     }
 
     const persistedCount = state.attachments.filter((attachment) => attachment.persistence === "browser").length;
-    let storageCopy = "Stored for this page session.";
+    let storageCopy = "Session only.";
     if (persistedCount === state.attachments.length) {
-        storageCopy = "Stored in this browser.";
+        storageCopy = "Encrypted copy remembered on this device.";
     } else if (persistedCount > 0) {
-        storageCopy = `${persistedCount} stored in this browser.`;
+        storageCopy = `${persistedCount} remembered on this device.`;
     }
     return `${attachmentCountLabel(state.attachments.length)} ready for local analysis. ${storageCopy}`;
 }
 
 function defaultAttachmentPrivacyMessage() {
-    return state.attachmentSupport.persistence === "browser"
-        ? "Files stay on this device inside this browser and are never uploaded to the Jobbr website. Remove them anytime from Workspace files."
+    return state.attachmentSupport.persistenceSupported
+        ? "Files are session-only by default. If you turn on Remember on this device, they are encrypted in this browser with your passphrase and never uploaded to the Jobbr website."
         : "Files are not uploaded to the internet or stored on the Jobbr website. They only exist while this page stays open.";
 }
 
@@ -169,9 +185,107 @@ function setDefaultAttachmentStatus({ busy = false, ready = state.attachmentSupp
     setAttachmentStatus(defaultAttachmentStatusMessage(), { busy, ready });
 }
 
+function attachmentPersistenceAvailable() {
+    return Boolean(state.attachmentSupport.persistenceSupported);
+}
+
+function bytesToBase64(bytes) {
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let index = 0; index < bytes.length; index += chunkSize) {
+        const chunk = bytes.subarray(index, index + chunkSize);
+        binary += String.fromCharCode(...chunk);
+    }
+    return window.btoa(binary);
+}
+
+function base64ToBytes(value) {
+    const binary = window.atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+}
+
+function randomBase64(byteLength) {
+    const bytes = new Uint8Array(byteLength);
+    window.crypto.getRandomValues(bytes);
+    return bytesToBase64(bytes);
+}
+
+function isEncryptedStoredRecord(record) {
+    return Boolean(record?.scheme === "aes-gcm-v1" && record?.blob_ciphertext && record?.meta_ciphertext);
+}
+
+function isLegacyStoredRecord(record) {
+    return Boolean(record?.blob);
+}
+
+async function deriveAttachmentVaultKey(passphrase, saltBase64) {
+    const keyMaterial = await window.crypto.subtle.importKey(
+        "raw",
+        textEncoder.encode(passphrase),
+        "PBKDF2",
+        false,
+        ["deriveKey"],
+    );
+    return window.crypto.subtle.deriveKey(
+        {
+            name: "PBKDF2",
+            salt: base64ToBytes(saltBase64),
+            iterations: ATTACHMENT_KEY_DERIVATION_ITERATIONS,
+            hash: "SHA-256",
+        },
+        keyMaterial,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"],
+    );
+}
+
+async function encryptBytesWithVaultKey(key, bytesLike) {
+    const iv = randomBase64(12);
+    const ciphertext = await window.crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: base64ToBytes(iv) },
+        key,
+        bytesLike,
+    );
+    return {
+        iv,
+        ciphertext,
+    };
+}
+
+async function decryptBytesWithVaultKey(key, ivBase64, bytesLike) {
+    return window.crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: base64ToBytes(ivBase64) },
+        key,
+        bytesLike,
+    );
+}
+
+async function promptForPassphrase({ confirm = false, existing = false } = {}) {
+    const firstPrompt = existing
+        ? "Enter the passphrase for remembered files on this device."
+        : "Create a passphrase for remembered files on this device.";
+    const passphrase = window.prompt(firstPrompt) || "";
+    if (!passphrase.trim()) {
+        return null;
+    }
+    if (!confirm) {
+        return passphrase;
+    }
+    const confirmation = window.prompt("Re-enter that passphrase to confirm.") || "";
+    if (passphrase !== confirmation) {
+        throw new Error("Passphrases did not match.");
+    }
+    return passphrase;
+}
+
 class AttachmentVault {
     constructor() {
-        this.supported = typeof indexedDB !== "undefined";
+        this.supported = attachmentPersistenceAvailable();
         this.dbPromise = null;
     }
 
@@ -194,6 +308,9 @@ class AttachmentVault {
                 const database = request.result;
                 if (!database.objectStoreNames.contains(ATTACHMENT_STORE_NAME)) {
                     database.createObjectStore(ATTACHMENT_STORE_NAME, { keyPath: "id" });
+                }
+                if (!database.objectStoreNames.contains(ATTACHMENT_META_STORE_NAME)) {
+                    database.createObjectStore(ATTACHMENT_META_STORE_NAME);
                 }
             });
             request.addEventListener("success", () => {
@@ -221,24 +338,54 @@ class AttachmentVault {
         });
     }
 
-    async save(record, file) {
+    async getConfig() {
+        const database = await this.open();
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction(ATTACHMENT_META_STORE_NAME, "readonly");
+            const store = transaction.objectStore(ATTACHMENT_META_STORE_NAME);
+            const request = store.get(ATTACHMENT_VAULT_CONFIG_KEY);
+            request.addEventListener("success", () => resolve(request.result || null));
+            request.addEventListener("error", () => reject(request.error || new Error("Unable to read vault settings.")));
+        });
+    }
+
+    async saveConfig(config) {
+        const database = await this.open();
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction(ATTACHMENT_META_STORE_NAME, "readwrite");
+            const store = transaction.objectStore(ATTACHMENT_META_STORE_NAME);
+            const request = store.put(config, ATTACHMENT_VAULT_CONFIG_KEY);
+            request.addEventListener("success", () => resolve(true));
+            request.addEventListener("error", () => reject(request.error || new Error("Unable to save vault settings.")));
+        });
+    }
+
+    async saveEncrypted(record, key) {
+        const metadata = {
+            name: record.name,
+            mime_type: record.mime_type,
+            size_bytes: record.size_bytes,
+            kind: record.kind,
+            path: record.path,
+            last_modified: record.last_modified,
+            saved_at: record.saved_at,
+        };
+        const encryptedMetadata = await encryptBytesWithVaultKey(key, textEncoder.encode(JSON.stringify(metadata)));
+        const encryptedFile = await encryptBytesWithVaultKey(key, await record.file.arrayBuffer());
         const database = await this.open();
         return new Promise((resolve, reject) => {
             const transaction = database.transaction(ATTACHMENT_STORE_NAME, "readwrite");
             const store = transaction.objectStore(ATTACHMENT_STORE_NAME);
             const request = store.put({
                 id: record.id,
-                name: record.name,
-                mime_type: record.mime_type,
-                size_bytes: record.size_bytes,
-                kind: record.kind,
-                path: record.path,
-                last_modified: record.last_modified,
-                saved_at: record.saved_at,
-                blob: file,
+                scheme: "aes-gcm-v1",
+                meta_iv: encryptedMetadata.iv,
+                meta_ciphertext: bytesToBase64(new Uint8Array(encryptedMetadata.ciphertext)),
+                blob_iv: encryptedFile.iv,
+                blob_ciphertext: new Blob([encryptedFile.ciphertext], { type: "application/octet-stream" }),
             });
             request.addEventListener("success", () => resolve(true));
-            request.addEventListener("error", () => reject(request.error || new Error("Unable to persist browser file.")));
+            request.addEventListener("error", () => reject(request.error || new Error("Unable to persist encrypted file.")));
         });
     }
 
@@ -256,33 +403,50 @@ class AttachmentVault {
     async clear() {
         const database = await this.open();
         return new Promise((resolve, reject) => {
-            const transaction = database.transaction(ATTACHMENT_STORE_NAME, "readwrite");
-            const store = transaction.objectStore(ATTACHMENT_STORE_NAME);
-            const request = store.clear();
-            request.addEventListener("success", () => resolve(true));
-            request.addEventListener("error", () => reject(request.error || new Error("Unable to clear browser files.")));
+            const transaction = database.transaction([ATTACHMENT_STORE_NAME, ATTACHMENT_META_STORE_NAME], "readwrite");
+            const attachmentStore = transaction.objectStore(ATTACHMENT_STORE_NAME);
+            const metaStore = transaction.objectStore(ATTACHMENT_META_STORE_NAME);
+            const clearAttachments = attachmentStore.clear();
+            const clearConfig = metaStore.delete(ATTACHMENT_VAULT_CONFIG_KEY);
+            let completed = 0;
+            const finish = () => {
+                completed += 1;
+                if (completed === 2) resolve(true);
+            };
+            clearAttachments.addEventListener("success", finish);
+            clearConfig.addEventListener("success", finish);
+            clearAttachments.addEventListener("error", () => reject(clearAttachments.error || new Error("Unable to clear stored files.")));
+            clearConfig.addEventListener("error", () => reject(clearConfig.error || new Error("Unable to clear vault settings.")));
         });
     }
 }
 
 const attachmentVault = new AttachmentVault();
 
-function hydrateStoredAttachment(item) {
-    const file = item.blob instanceof File
-        ? item.blob
-        : new File([item.blob], item.name, {
-            type: item.mime_type || "application/octet-stream",
-            lastModified: item.last_modified || Date.now(),
-        });
+async function decryptStoredAttachment(item, key) {
+    const metadataBuffer = await decryptBytesWithVaultKey(
+        key,
+        item.meta_iv,
+        base64ToBytes(item.meta_ciphertext),
+    );
+    const metadata = JSON.parse(textDecoder.decode(metadataBuffer));
+    const ciphertextBuffer = item.blob_ciphertext instanceof Blob
+        ? await item.blob_ciphertext.arrayBuffer()
+        : item.blob_ciphertext;
+    const fileBuffer = await decryptBytesWithVaultKey(key, item.blob_iv, ciphertextBuffer);
+    const file = new File([fileBuffer], metadata.name, {
+        type: metadata.mime_type || "application/octet-stream",
+        lastModified: metadata.last_modified || Date.now(),
+    });
     return {
         id: item.id,
-        name: item.name,
-        mime_type: item.mime_type || "application/octet-stream",
-        size_bytes: item.size_bytes || file.size,
-        kind: item.kind,
-        path: item.path,
-        last_modified: item.last_modified || file.lastModified || Date.now(),
-        saved_at: item.saved_at || new Date().toISOString(),
+        name: metadata.name,
+        mime_type: metadata.mime_type || "application/octet-stream",
+        size_bytes: metadata.size_bytes || file.size,
+        kind: metadata.kind,
+        path: metadata.path,
+        last_modified: metadata.last_modified || file.lastModified || Date.now(),
+        saved_at: metadata.saved_at || new Date().toISOString(),
         persistence: "browser",
         file,
     };
@@ -598,43 +762,239 @@ function attachmentRecordFromFile(file) {
     };
 }
 
-async function persistAttachmentRecord(record, file) {
-    if (!attachmentVault.supported) return false;
-    try {
-        await attachmentVault.save(record, file);
-        return true;
-    } catch (error) {
-        if (!attachmentVault.supported) {
-            state.attachmentSupport.persistence = "session";
-        }
-        return false;
+function loadedPersistentAttachmentCount() {
+    return state.attachments.filter((attachment) => attachment.persistence === "browser").length;
+}
+
+async function refreshStoredAttachmentState() {
+    if (!attachmentVault.supported) {
+        state.attachmentSupport.persistenceSupported = false;
+        attachmentVaultKey = null;
+        attachmentVaultConfig = null;
+        state.attachmentSecurity = {
+            ...state.attachmentSecurity,
+            persistentOptIn: false,
+            unlocked: false,
+            lockedRecordCount: 0,
+            hasEncryptedVault: false,
+            legacyRecordCount: 0,
+        };
+        return;
+    }
+
+    const records = await attachmentVault.list();
+    attachmentVaultConfig = await attachmentVault.getConfig();
+    const encryptedRecords = records.filter(isEncryptedStoredRecord);
+    const legacyRecords = records.filter(isLegacyStoredRecord);
+    state.attachmentSecurity = {
+        ...state.attachmentSecurity,
+        hasEncryptedVault: Boolean(attachmentVaultConfig) || encryptedRecords.length > 0,
+        lockedRecordCount: state.attachmentSecurity.unlocked ? 0 : encryptedRecords.length,
+        legacyRecordCount: legacyRecords.length,
+    };
+    if (!state.attachmentSecurity.hasEncryptedVault) {
+        state.attachmentSecurity.persistentOptIn = false;
+        state.attachmentSecurity.unlocked = false;
+        attachmentVaultKey = null;
     }
 }
 
-async function restorePersistedAttachments() {
+function mergeUnlockedAttachments(unlockedAttachments) {
+    const merged = new Map();
+    for (const attachment of state.attachments) {
+        if (attachment.persistence !== "browser") {
+            merged.set(attachment.id, attachment);
+        }
+    }
+    for (const attachment of unlockedAttachments) {
+        merged.set(attachment.id, attachment);
+    }
+    state.attachments = [...merged.values()];
+}
+
+async function rememberLoadedAttachments() {
+    if (!state.attachmentSecurity.persistentOptIn || !attachmentVault.supported || !attachmentVaultKey) {
+        return;
+    }
+    for (const attachment of state.attachments) {
+        if (attachment.persistence === "browser") continue;
+        await attachmentVault.saveEncrypted(attachment, attachmentVaultKey);
+        attachment.persistence = "browser";
+    }
+    await refreshStoredAttachmentState();
+}
+
+async function unlockPersistedAttachments({ create = false, enableRemember = false } = {}) {
     if (!attachmentVault.supported) {
-        state.attachmentSupport.persistence = "session";
+        throw new Error("Encrypted device storage is unavailable in this browser.");
+    }
+
+    const encryptedRecords = (await attachmentVault.list()).filter(isEncryptedStoredRecord);
+    let config = attachmentVaultConfig || await attachmentVault.getConfig();
+    let passphrase;
+    if (!config) {
+        if (encryptedRecords.length > 0) {
+            throw new Error("Remembered files on this device are missing their vault settings and need to be cleared.");
+        }
+        if (!create) {
+            throw new Error("No remembered files are stored on this device.");
+        }
+        passphrase = await promptForPassphrase({ confirm: true, existing: false });
+        if (!passphrase) return false;
+        config = {
+            scheme: "aes-gcm-v1",
+            salt: randomBase64(16),
+            iterations: ATTACHMENT_KEY_DERIVATION_ITERATIONS,
+            created_at: new Date().toISOString(),
+        };
+        await attachmentVault.saveConfig(config);
+    } else {
+        passphrase = await promptForPassphrase({ existing: true });
+        if (!passphrase) return false;
+    }
+
+    const key = await deriveAttachmentVaultKey(passphrase, config.salt);
+    let unlockedAttachments = [];
+    try {
+        unlockedAttachments = await Promise.all(
+            encryptedRecords.map((record) => decryptStoredAttachment(record, key)),
+        );
+    } catch (error) {
+        throw new Error("Passphrase did not unlock remembered files.");
+    }
+
+    attachmentVaultConfig = config;
+    attachmentVaultKey = key;
+    state.attachmentSecurity.unlocked = true;
+    state.attachmentSecurity.persistentOptIn = enableRemember || state.attachmentSecurity.persistentOptIn;
+    mergeUnlockedAttachments(unlockedAttachments);
+    state.attachmentSessionNeedsSync = state.attachments.length > 0;
+    await refreshStoredAttachmentState();
+    if (state.attachments.length) {
+        await rebuildAttachmentSession({ force: true });
+    } else {
+        setDefaultAttachmentStatus({ busy: false, ready: Boolean(pyodideBridge?.readyPromise) });
+    }
+    requestRender();
+    return true;
+}
+
+async function lockPersistedAttachments() {
+    attachmentVaultKey = null;
+    state.attachmentSecurity.unlocked = false;
+    state.attachmentSecurity.persistentOptIn = false;
+    state.attachments = state.attachments.filter((attachment) => attachment.persistence !== "browser");
+    clearToolStatuses();
+    if (state.attachments.length) {
+        state.attachmentSessionNeedsSync = true;
+        await rebuildAttachmentSession({ force: true });
+    } else if (pyodideBridge) {
+        await pyodideBridge.clearSession();
+        state.attachmentSessionNeedsSync = false;
+    }
+    await refreshStoredAttachmentState();
+    setDefaultAttachmentStatus({ busy: false, ready: Boolean(pyodideBridge?.readyPromise) });
+    requestRender();
+}
+
+async function clearStoredAttachments() {
+    state.attachments = state.attachments.filter((attachment) => attachment.persistence !== "browser");
+    clearToolStatuses();
+    if (attachmentVault.supported) {
+        await attachmentVault.clear();
+    }
+    attachmentVaultKey = null;
+    attachmentVaultConfig = null;
+    state.attachmentSecurity.unlocked = false;
+    state.attachmentSecurity.persistentOptIn = false;
+    await refreshStoredAttachmentState();
+    if (state.attachments.length) {
+        state.attachmentSessionNeedsSync = true;
+        await rebuildAttachmentSession({ force: true });
+    } else if (pyodideBridge) {
+        await pyodideBridge.clearSession();
+        state.attachmentSessionNeedsSync = false;
+    }
+    setDefaultAttachmentStatus({ busy: false, ready: Boolean(pyodideBridge?.readyPromise) });
+    requestRender();
+}
+
+async function togglePersistentAttachments(enabled) {
+    if (!enabled) {
+        state.attachmentSecurity.persistentOptIn = false;
+        setDefaultAttachmentStatus({ busy: false, ready: state.attachmentSupport.ready });
+        requestRender();
+        return;
+    }
+
+    if (!attachmentVault.supported) {
+        throw new Error("Encrypted device storage is unavailable in this browser.");
+    }
+
+    if (!state.attachmentSecurity.unlocked) {
+        const unlocked = await unlockPersistedAttachments({
+            create: !state.attachmentSecurity.hasEncryptedVault,
+            enableRemember: true,
+        });
+        if (!unlocked) return;
+    }
+
+    state.attachmentSecurity.persistentOptIn = true;
+    await rememberLoadedAttachments();
+    setDefaultAttachmentStatus({ busy: false, ready: state.attachmentSupport.ready });
+    requestRender();
+}
+
+async function restorePersistedAttachments() {
+    state.attachments = [];
+    state.attachmentSessionNeedsSync = false;
+    state.attachmentSecurity.persistentOptIn = false;
+    state.attachmentSecurity.unlocked = false;
+    attachmentVaultKey = null;
+
+    if (!attachmentVault.supported) {
+        state.attachmentSupport.persistenceSupported = false;
         setDefaultAttachmentStatus({ busy: false, ready: false });
         requestRender();
         return;
     }
 
     try {
-        const items = await attachmentVault.list();
-        state.attachmentSupport.persistence = "browser";
-        state.attachments = items.map(hydrateStoredAttachment);
-        state.attachmentSessionNeedsSync = state.attachments.length > 0;
-        setDefaultAttachmentStatus({ busy: false, ready: false });
+        await refreshStoredAttachmentState();
+        if (state.attachmentSecurity.lockedRecordCount > 0 && !attachmentVaultConfig) {
+            setAttachmentStatus(
+                "Remembered files were found, but their vault settings are missing. Clear stored files, then re-add what you need.",
+                { busy: false, ready: false },
+            );
+        } else if (state.attachmentSecurity.legacyRecordCount > 0) {
+            setAttachmentStatus(
+                "Older unencrypted browser files were found from a previous version. Clear them, then re-add any files you still need.",
+                { busy: false, ready: false },
+            );
+        } else {
+            setDefaultAttachmentStatus({ busy: false, ready: false });
+        }
     } catch (error) {
-        state.attachmentSupport.persistence = "session";
-        state.attachments = [];
-        state.attachmentSessionNeedsSync = false;
+        state.attachmentSupport.persistenceSupported = false;
         setAttachmentStatus(
-            "Local analysis loads on first file add. Browser file persistence is unavailable here.",
+            "Encrypted device storage is unavailable here, so files will stay session-only.",
             { busy: false, ready: false },
         );
     }
     requestRender();
+}
+
+async function persistAttachmentRecord(record) {
+    if (!state.attachmentSecurity.persistentOptIn || !attachmentVault.supported) {
+        return false;
+    }
+    if (!attachmentVaultKey) {
+        throw new Error("Unlock remembered files before adding more.");
+    }
+    await attachmentVault.saveEncrypted(record, attachmentVaultKey);
+    record.persistence = "browser";
+    await refreshStoredAttachmentState();
+    return true;
 }
 
 async function addAttachments(fileList) {
@@ -662,9 +1022,7 @@ async function addAttachments(fileList) {
         try {
             setAttachmentStatus(`Adding ${file.name} to Workspace files...`, { busy: true, ready: true });
             await ensurePyodideBridge().addAttachment(attachmentPayload(record), file);
-            if (await persistAttachmentRecord(record, file)) {
-                record.persistence = "browser";
-            }
+            await persistAttachmentRecord(record);
             state.attachments.push(record);
             state.attachmentSessionNeedsSync = false;
             setDefaultAttachmentStatus({ busy: false, ready: true });
@@ -688,12 +1046,14 @@ async function removeAttachment(attachmentId) {
     if (attachment?.persistence === "browser" && attachmentVault.supported) {
         try {
             await attachmentVault.delete(attachmentId);
+            await refreshStoredAttachmentState();
         } catch (error) {
             // Session state still wins even if browser cleanup misses once.
         }
     }
 
     if (state.attachments.length) {
+        state.attachmentSessionNeedsSync = true;
         await rebuildAttachmentSession({ force: true });
     } else if (pyodideBridge) {
         await pyodideBridge.clearSession();
@@ -714,6 +1074,7 @@ async function resetAttachments({ clearStorage = true } = {}) {
     if (pyodideBridge) {
         await pyodideBridge.clearSession();
     }
+
     if (clearStorage && attachmentVault.supported) {
         try {
             await attachmentVault.clear();
@@ -721,6 +1082,11 @@ async function resetAttachments({ clearStorage = true } = {}) {
             // Clearing the active workspace matters more than background cache cleanup.
         }
     }
+
+    attachmentVaultKey = null;
+    state.attachmentSecurity.unlocked = false;
+    state.attachmentSecurity.persistentOptIn = false;
+    await refreshStoredAttachmentState();
     setDefaultAttachmentStatus({ busy: false, ready: Boolean(pyodideBridge?.readyPromise) });
     requestRender();
 }
@@ -1009,11 +1375,70 @@ function renderThread() {
     elements.thread.scrollTop = elements.thread.scrollHeight;
 }
 
+function renderAttachmentSecurity(providerSupportsTools) {
+    const showSecurity = state.attachmentSupport.supported || state.attachmentSecurity.hasEncryptedVault || state.attachmentSecurity.legacyRecordCount > 0;
+    if (!showSecurity) {
+        elements.attachmentSecurity.hidden = true;
+        elements.attachmentSecurity.innerHTML = "";
+        return;
+    }
+
+    const actions = [];
+    if (attachmentPersistenceAvailable()) {
+        actions.push(`
+            <label class="attachment-persist-toggle">
+                <input
+                    type="checkbox"
+                    data-attachment-action="toggle-persist"
+                    ${state.attachmentSecurity.persistentOptIn ? "checked" : ""}
+                >
+                <span>Remember on this device</span>
+            </label>
+        `);
+    }
+    if (state.attachmentSecurity.lockedRecordCount > 0 && !state.attachmentSecurity.unlocked) {
+        actions.push('<button type="button" class="ghost-button attachment-security-button" data-attachment-action="unlock-stored">Unlock files</button>');
+    }
+    if (state.attachmentSecurity.unlocked && loadedPersistentAttachmentCount() > 0) {
+        actions.push('<button type="button" class="ghost-button attachment-security-button" data-attachment-action="lock-stored">Lock files</button>');
+    }
+    if (state.attachmentSecurity.hasEncryptedVault || state.attachmentSecurity.legacyRecordCount > 0) {
+        actions.push('<button type="button" class="ghost-button attachment-security-button" data-attachment-action="clear-stored">Clear stored files</button>');
+    }
+
+    let summary = "Session-only mode keeps new files out of browser storage.";
+    if (!attachmentPersistenceAvailable()) {
+        summary = "Encrypted device storage is unavailable in this browser.";
+    } else if (state.attachmentSecurity.legacyRecordCount > 0) {
+        summary = `${attachmentCountLabel(state.attachmentSecurity.legacyRecordCount)} from an older unencrypted cache need to be cleared.`;
+    } else if (state.attachmentSecurity.lockedRecordCount > 0) {
+        summary = `${attachmentCountLabel(state.attachmentSecurity.lockedRecordCount)} remembered on this device and locked.`;
+    } else if (state.attachmentSecurity.unlocked && loadedPersistentAttachmentCount() > 0) {
+        summary = "Remembered files are unlocked for this session.";
+    } else if (state.attachmentSecurity.persistentOptIn) {
+        summary = "New files will be encrypted before they are remembered on this device.";
+    }
+    if (!providerSupportsTools) {
+        summary += " Switch to a tool-capable provider to analyze local files.";
+    }
+
+    elements.attachmentSecurity.hidden = false;
+    elements.attachmentSecurity.innerHTML = `
+        <section class="attachment-security-panel">
+            <div class="attachment-security-actions">
+                ${actions.join("")}
+            </div>
+            <p class="attachment-security-copy">${escapeHtml(summary)}</p>
+        </section>
+    `;
+}
+
 function renderAttachments() {
     const providerSupportsTools = activeProviderSupportsBrowserTools();
     elements.attachmentInput.disabled = state.streaming || !providerSupportsTools;
     elements.attachmentPrivacy.hidden = !state.attachmentSupport.supported;
     elements.attachmentPrivacy.textContent = defaultAttachmentPrivacyMessage();
+    renderAttachmentSecurity(providerSupportsTools);
 
     let attachmentStatusMessage = "";
     if (!state.attachmentSupport.supported) {
@@ -1034,10 +1459,10 @@ function renderAttachments() {
     }
 
     const totalBytes = formatFileSize(totalAttachmentBytes());
-    const persistedCount = state.attachments.filter((attachment) => attachment.persistence === "browser").length;
+    const persistedCount = loadedPersistentAttachmentCount();
     const storageSummary = persistedCount === state.attachments.length
-        ? "Stored in this browser"
-        : (persistedCount > 0 ? `${persistedCount} stored in this browser` : "Session only");
+        ? "Encrypted copy remembered on this device"
+        : (persistedCount > 0 ? `${persistedCount} remembered on this device` : "Session only");
 
     elements.attachmentTray.hidden = false;
     elements.attachmentTray.innerHTML = `
@@ -1059,7 +1484,7 @@ function renderAttachments() {
                             <strong>${escapeHtml(attachment.name)}</strong>
                             <span>${escapeHtml(
                                 `${attachment.kind.toUpperCase()} · ${formatFileSize(attachment.size_bytes)} · ${
-                                    attachment.persistence === "browser" ? "Stored in browser" : "Session only"
+                                    attachment.persistence === "browser" ? "Remembered on device" : "Session only"
                                 }`
                             )}</span>
                         </div>
@@ -1686,7 +2111,7 @@ async function renameCurrentChat() {
 }
 
 async function logout() {
-    await resetAttachments();
+    await resetAttachments({ clearStorage: false });
     if (pyodideBridge) {
         pyodideBridge.destroy();
     }
@@ -1854,6 +2279,64 @@ elements.attachmentInput.addEventListener("change", async (event) => {
         );
     } finally {
         elements.attachmentInput.value = "";
+    }
+});
+
+elements.attachmentSecurity.addEventListener("change", async (event) => {
+    const toggle = event.target.closest("[data-attachment-action='toggle-persist']");
+    if (!toggle) return;
+    try {
+        await togglePersistentAttachments(toggle.checked);
+    } catch (error) {
+        toggle.checked = state.attachmentSecurity.persistentOptIn;
+        setAttachmentStatus(
+            error instanceof Error ? error.message : "Unable to update encrypted storage.",
+            { busy: false, ready: false },
+        );
+    }
+});
+
+elements.attachmentSecurity.addEventListener("click", async (event) => {
+    if (event.target.closest("[data-attachment-action='toggle-persist']")) {
+        return;
+    }
+
+    const unlockButton = event.target.closest("[data-attachment-action='unlock-stored']");
+    if (unlockButton) {
+        try {
+            await unlockPersistedAttachments({ create: false, enableRemember: false });
+        } catch (error) {
+            setAttachmentStatus(
+                error instanceof Error ? error.message : "Unable to unlock remembered files.",
+                { busy: false, ready: false },
+            );
+        }
+        return;
+    }
+
+    const lockButton = event.target.closest("[data-attachment-action='lock-stored']");
+    if (lockButton) {
+        try {
+            await lockPersistedAttachments();
+        } catch (error) {
+            setAttachmentStatus(
+                error instanceof Error ? error.message : "Unable to lock remembered files.",
+                { busy: false, ready: false },
+            );
+        }
+        return;
+    }
+
+    const clearStoredButton = event.target.closest("[data-attachment-action='clear-stored']");
+    if (clearStoredButton) {
+        try {
+            await clearStoredAttachments();
+        } catch (error) {
+            setAttachmentStatus(
+                error instanceof Error ? error.message : "Unable to clear stored files.",
+                { busy: false, ready: false },
+            );
+        }
     }
 });
 

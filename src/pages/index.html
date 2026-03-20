@@ -223,11 +223,12 @@
                             hidden
                             accept=".csv,.tsv,.json,.txt,.md,.xlsx,.pdf,.docx,text/csv,text/tab-separated-values,application/json,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         >
-                        <p id="attachment-status" class="attachment-status">Local analysis warms in the background. Files stay in this browser until you remove them.</p>
+                        <p id="attachment-status" class="attachment-status">Local analysis keeps files in this session unless you turn on encrypted device storage.</p>
                     </div>
+                    <div id="attachment-security" class="attachment-security"></div>
                     <div id="attachment-tray" class="attachment-tray" hidden></div>
                     <p id="attachment-privacy" class="attachment-privacy">
-                        Files stay on this device inside this browser and are never uploaded to the Jobbr website.
+                        Files are session-only by default. If you turn on Remember on this device, they are encrypted in this browser with your passphrase and never uploaded to the Jobbr website.
                     </p>
                     <textarea
                         id="input-box"
